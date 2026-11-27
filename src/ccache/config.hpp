@@ -24,6 +24,11 @@
 #include <ccache/util/path.hpp>
 #include <ccache/util/string.hpp>
 
+#include <rfl/DefaultVal.hpp>
+#include <rfl/Description.hpp>
+#include <rfl/Rename.hpp>
+#include <rfl/internal/StringLiteral.hpp>
+
 #include <sys/types.h>
 
 #include <cstdint>
@@ -32,7 +37,9 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 enum class CompilerType {
@@ -51,6 +58,380 @@ enum class CompilerType {
 
 std::string compiler_type_to_string(CompilerType compiler_type);
 
+enum class DirConfigPolicy : uint8_t {
+  allow,  // always allow
+  reject, // always reject with an error
+  unsafe, // allow if config is in directory matching safe_dirs, error otherwise
+};
+
+namespace config_detail {
+
+const char* libexec_dir();
+
+#ifndef _WIN32
+inline constexpr bool k_default_inode_cache = true;
+#else
+// Support is experimental on Windows so usage is off by default.
+inline constexpr bool k_default_inode_cache = false;
+#endif
+
+struct ConfigMeta;
+
+} // namespace config_detail
+
+template<class T,
+         rfl::internal::StringLiteral Desc,
+         rfl::internal::StringLiteral EnvVar,
+         DirConfigPolicy Policy = DirConfigPolicy::allow,
+         rfl::internal::StringLiteral EnvAlias = "",
+         rfl::internal::StringLiteral KeyAlias = "">
+struct ConfigOption
+{
+  using ValueType = T;
+  using Type = rfl::Description<Desc, rfl::DefaultVal<T>>;
+  using ReflectionType = Type;
+  static constexpr bool is_transparent_wrapper_ = true;
+
+  static constexpr std::string_view description = Desc.string_view();
+  static constexpr std::string_view env_var = EnvVar.string_view();
+  static constexpr DirConfigPolicy dir_policy = Policy;
+  static constexpr std::string_view env_alias = EnvAlias.string_view();
+  static constexpr std::string_view key_alias = KeyAlias.string_view();
+
+  ConfigOption() = default;
+  ConfigOption(const T& v) : value_(rfl::DefaultVal<T>(v)) {}
+  ConfigOption(T&& v) : value_(rfl::DefaultVal<T>(std::move(v))) {}
+  ConfigOption(const Type& v) : value_(v) {}
+  ConfigOption(Type&& v) : value_(std::move(v)) {}
+
+  template<class U>
+    requires(!std::is_same_v<std::remove_cvref_t<U>, ConfigOption>
+             && !std::is_same_v<std::remove_cvref_t<U>, Type>
+             && !std::is_same_v<std::remove_cvref_t<U>, T>
+             && std::is_convertible_v<U, T>)
+  ConfigOption(U&& v) : value_(rfl::DefaultVal<T>(std::forward<U>(v)))
+  {
+  }
+
+  ConfigOption(const ConfigOption&) = default;
+  ConfigOption(ConfigOption&&) = default;
+  ConfigOption& operator=(const ConfigOption&) = default;
+  ConfigOption& operator=(ConfigOption&&) = default;
+
+  ConfigOption&
+  operator=(const T& v)
+  {
+    value_.value().value() = v;
+    return *this;
+  }
+
+  ConfigOption&
+  operator=(T&& v)
+  {
+    value_.value().value() = std::move(v);
+    return *this;
+  }
+
+  const Type&
+  value() const noexcept
+  {
+    return value_;
+  }
+
+  Type&
+  value() noexcept
+  {
+    return value_;
+  }
+
+  const Type&
+  reflection() const noexcept
+  {
+    return value_;
+  }
+
+  const T&
+  get() const noexcept
+  {
+    return value_.value().value();
+  }
+
+  T&
+  get() noexcept
+  {
+    return value_.value().value();
+  }
+
+  const T&
+  operator*() const noexcept
+  {
+    return get();
+  }
+
+  T&
+  operator*() noexcept
+  {
+    return get();
+  }
+
+  const T*
+  operator->() const noexcept
+  {
+    return &get();
+  }
+
+  T*
+  operator->() noexcept
+  {
+    return &get();
+  }
+
+  Type value_;
+};
+
+// Single Source of Truth for all 48 ccache configuration options.
+// Fields MUST remain in strict alphabetical order of canonical keys (enforced
+// by static_assert in config.cpp).
+struct ConfigData
+{
+  ConfigOption<bool,
+               "Rewrite relative paths in stderr to absolute paths",
+               "ABSSTDERR">
+    absolute_paths_in_stderr = false;
+
+  ConfigOption<std::vector<std::filesystem::path>,
+               "Base directories for rewriting absolute paths to relative",
+               "BASEDIR">
+    base_dir;
+
+  ConfigOption<std::filesystem::path,
+               "Directory where ccache keeps cached compiler outputs",
+               "DIR",
+               DirConfigPolicy::reject>
+    cache_dir;
+
+  ConfigOption<std::vector<std::filesystem::path>,
+               "Directories at which to stop searching for directory configs",
+               "CEILING_DIRS",
+               DirConfigPolicy::reject>
+    ceiling_dirs;
+
+  ConfigOption<std::vector<std::filesystem::path>,
+               "Marker files/dirs that stop searching for directory configs",
+               "CEILING_MARKERS",
+               DirConfigPolicy::reject>
+    ceiling_markers = std::vector<std::filesystem::path>{".git"};
+
+  ConfigOption<std::string,
+               "Override the compiler to use",
+               "COMPILER",
+               DirConfigPolicy::unsafe,
+               "CC">
+    compiler;
+
+  ConfigOption<std::string,
+               "How to verify that the compiler has not changed",
+               "COMPILERCHECK",
+               DirConfigPolicy::unsafe>
+    compiler_check = "mtime";
+
+  ConfigOption<CompilerType,
+               "Explicit compiler type instead of auto-detection",
+               "COMPILERTYPE">
+    compiler_type = CompilerType::auto_guess;
+
+  ConfigOption<bool, "Compress files stored in the cache", "COMPRESS">
+    compression = true;
+
+  ConfigOption<int8_t,
+               "Compression level (0 uses default level)",
+               "COMPRESSLEVEL">
+    compression_level = 0;
+
+  ConfigOption<bool, "Enable debug mode", "DEBUG"> debug = false;
+
+  ConfigOption<std::filesystem::path,
+               "Directory in which to write debug files",
+               "DEBUGDIR",
+               DirConfigPolicy::unsafe>
+    debug_dir;
+
+  ConfigOption<uint8_t, "Amount of debug information written", "DEBUGLEVEL">
+    debug_level = 2;
+
+  ConfigOption<bool, "Enable depend mode", "DEPEND"> depend_mode = false;
+
+  ConfigOption<bool, "Enable direct mode", "DIRECT"> direct_mode = true;
+
+  ConfigOption<bool, "Disable ccache and invoke compiler directly", "DISABLE">
+    disable = false;
+
+  ConfigOption<std::string,
+               "Extra files to include in the hash",
+               "EXTRAFILES">
+    extra_files_to_hash;
+
+  ConfigOption<bool,
+               "Clone files instead of copying when supported by filesystem",
+               "FILECLONE">
+    file_clone = false;
+
+  ConfigOption<bool, "Hard-link object files instead of copying", "HARDLINK">
+    hard_link = false;
+
+  ConfigOption<bool,
+               "Include current working directory in the hash",
+               "HASHDIR">
+    hash_dir = true;
+
+  ConfigOption<std::string,
+               "Paths to headers to exclude from the manifest",
+               "IGNOREHEADERS">
+    ignore_headers_in_manifest;
+
+  ConfigOption<std::string,
+               "Compiler options to ignore when computing the hash",
+               "IGNOREOPTIONS">
+    ignore_options;
+
+  ConfigOption<bool,
+               "Cache file content hashes by inode to speed up repeated lookups",
+               "INODECACHE">
+    inode_cache = config_detail::k_default_inode_cache;
+
+  ConfigOption<bool,
+               "Keep comments when running the preprocessor",
+               "COMMENTS">
+    keep_comments_cpp = false;
+
+  ConfigOption<std::vector<std::filesystem::path>,
+               "Directories searched for storage helper programs",
+               "LIBEXEC_DIRS",
+               DirConfigPolicy::unsafe>
+    libexec_dirs =
+      std::vector<std::filesystem::path>{config_detail::libexec_dir()};
+
+  ConfigOption<std::filesystem::path,
+               "Path to log file for ccache debug logs",
+               "LOGFILE",
+               DirConfigPolicy::unsafe>
+    log_file;
+
+  ConfigOption<uint64_t,
+               "Maximum number of files allowed in the cache (0 = unlimited)",
+               "MAXFILES",
+               DirConfigPolicy::reject>
+    max_files = 0;
+
+  ConfigOption<uint64_t,
+               "Maximum size of the cache in bytes (0 = unlimited)",
+               "MAXSIZE",
+               DirConfigPolicy::reject>
+    max_size = 5ULL * 1024 * 1024 * 1024;
+
+  ConfigOption<std::string,
+               "Prefix used by MSVC /showIncludes output",
+               "MSVC_DEP_PREFIX">
+    msvc_dep_prefix = "Note: including file:";
+
+  ConfigOption<bool, "Force UTF-8 output for MSVC", "MSVC_UTF8">
+    msvc_utf8 = true;
+
+  rfl::Rename<"namespace",
+              ConfigOption<std::string,
+                           "Namespace string added to the hash",
+                           "NAMESPACE">>
+    namespace_;
+
+  ConfigOption<std::string,
+               "Search PATH used to locate the real compiler",
+               "PATH",
+               DirConfigPolicy::unsafe>
+    path;
+
+  ConfigOption<bool,
+               "Use external checksum file for precompiled headers",
+               "PCH_EXTSUM">
+    pch_external_checksum = false;
+
+  ConfigOption<std::string,
+               "Command prefix prepended when invoking the compiler",
+               "PREFIX",
+               DirConfigPolicy::unsafe>
+    prefix_command;
+
+  ConfigOption<std::string,
+               "Command prefix prepended when invoking the preprocessor",
+               "PREFIX_CPP",
+               DirConfigPolicy::unsafe>
+    prefix_command_cpp;
+
+  ConfigOption<bool, "Do not write new entries to the cache", "READONLY">
+    read_only = false;
+
+  ConfigOption<bool,
+               "Only read from direct mode cache without updating it",
+               "READONLY_DIRECT">
+    read_only_direct = false;
+
+  ConfigOption<bool,
+               "Ignore existing cache hits and overwrite with fresh output",
+               "RECACHE">
+    recache = false;
+
+  ConfigOption<bool, "Use only remote storage without local cache", "REMOTE_ONLY">
+    remote_only = false;
+
+  ConfigOption<std::string,
+               "Remote storage backend URL(s)",
+               "REMOTE_STORAGE",
+               DirConfigPolicy::unsafe,
+               "SECONDARY_STORAGE",
+               "secondary_storage">
+    remote_storage;
+
+  ConfigOption<bool,
+               "Write local cache hits back to remote storage",
+               "RESHARE">
+    reshare = false;
+
+  ConfigOption<util::Args::ResponseFileFormat,
+               "Quoting format used for @response files",
+               "RESPONSE_FILE_FORMAT">
+    response_file_format = util::Args::ResponseFileFormat::auto_guess;
+
+  ConfigOption<std::vector<std::filesystem::path>,
+               "Directories where unsafe directory config options are allowed",
+               "SAFE_DIRS",
+               DirConfigPolicy::reject>
+    safe_dirs;
+
+  ConfigOption<core::Sloppiness,
+               "Comma-separated list of relaxed cache-correctness checks",
+               "SLOPPINESS">
+    sloppiness;
+
+  ConfigOption<bool, "Update cache statistics counters", "STATS"> stats = true;
+
+  ConfigOption<std::filesystem::path,
+               "Path to statistics log file",
+               "STATSLOG",
+               DirConfigPolicy::unsafe>
+    stats_log;
+
+  ConfigOption<std::filesystem::path,
+               "Directory for temporary files",
+               "TEMPDIR",
+               DirConfigPolicy::unsafe>
+    temporary_dir;
+
+  ConfigOption<std::optional<mode_t>,
+               "File creation umask for files created by ccache",
+               "UMASK",
+               DirConfigPolicy::unsafe>
+    umask;
+};
+
 class Config : util::NonCopyable
 {
 public:
@@ -60,6 +441,9 @@ public:
 
   static const char* libexec_dir();
   static const char* sysconf_dir();
+
+  static std::string json_schema();
+  std::string to_json() const;
 
   bool absolute_paths_in_stderr() const;
   const std::vector<std::filesystem::path>& base_dirs() const;
@@ -186,64 +570,13 @@ public:
   static void check_key_tables_consistency();
 
 private:
+  friend struct config_detail::ConfigMeta;
+
   std::filesystem::path m_config_path;
   std::filesystem::path m_dir_config_path;
   std::filesystem::path m_system_config_path;
 
-  bool m_absolute_paths_in_stderr = false;
-  std::vector<std::filesystem::path> m_base_dirs;
-  std::filesystem::path m_cache_dir;
-  std::vector<std::filesystem::path> m_ceiling_dirs;
-  std::vector<std::filesystem::path> m_ceiling_markers = {".git"};
-  std::string m_compiler;
-  std::string m_compiler_check = "mtime";
-  CompilerType m_compiler_type = CompilerType::auto_guess;
-  bool m_compression = true;
-  int8_t m_compression_level = 0; // Use default level
-  bool m_debug = false;
-  std::filesystem::path m_debug_dir;
-  uint8_t m_debug_level = 2;
-  bool m_depend_mode = false;
-  bool m_direct_mode = true;
-  bool m_disable = false;
-  std::string m_extra_files_to_hash;
-  bool m_file_clone = false;
-  bool m_hard_link = false;
-  bool m_hash_dir = true;
-  std::string m_ignore_headers_in_manifest;
-  std::string m_ignore_options;
-#ifndef _WIN32
-  bool m_inode_cache = true;
-#else
-  // Support is experimental on Windows so usage is off by default.
-  bool m_inode_cache = false;
-#endif
-  bool m_keep_comments_cpp = false;
-  std::filesystem::path m_log_file;
-  std::vector<std::filesystem::path> m_libexec_dirs{libexec_dir()};
-  uint64_t m_max_files = 0;
-  uint64_t m_max_size = 5ULL * 1024 * 1024 * 1024;
-  std::string m_msvc_dep_prefix = "Note: including file:";
-  bool m_msvc_utf8 = true;
-  std::string m_path;
-  bool m_pch_external_checksum = false;
-  std::string m_prefix_command;
-  std::string m_prefix_command_cpp;
-  bool m_read_only = false;
-  bool m_read_only_direct = false;
-  bool m_recache = false;
-  bool m_reshare = false;
-  bool m_remote_only = false;
-  std::string m_remote_storage;
-  util::Args::ResponseFileFormat m_response_file_format =
-    util::Args::ResponseFileFormat::auto_guess;
-  std::vector<std::filesystem::path> m_safe_dirs;
-  core::Sloppiness m_sloppiness;
-  bool m_stats = true;
-  std::filesystem::path m_stats_log;
-  std::string m_namespace;
-  std::filesystem::path m_temporary_dir;
-  std::optional<mode_t> m_umask;
+  ConfigData m_data;
 
   bool m_temporary_dir_configured_explicitly = false;
   util::SizeUnitPrefixType m_size_prefix_type =
@@ -264,277 +597,279 @@ private:
 inline bool
 Config::absolute_paths_in_stderr() const
 {
-  return m_absolute_paths_in_stderr;
+  return m_data.absolute_paths_in_stderr.get();
 }
 
 inline const std::vector<std::filesystem::path>&
 Config::base_dirs() const
 {
-  return m_base_dirs;
+  return m_data.base_dir.get();
 }
 
 inline const std::filesystem::path&
 Config::cache_dir() const
 {
-  return m_cache_dir;
+  return m_data.cache_dir.get();
 }
 
 inline const std::vector<std::filesystem::path>&
 Config::ceiling_dirs() const
 {
-  return m_ceiling_dirs;
+  return m_data.ceiling_dirs.get();
 }
 
 inline const std::vector<std::filesystem::path>&
 Config::ceiling_markers() const
 {
-  return m_ceiling_markers;
+  return m_data.ceiling_markers.get();
 }
 
 inline const std::string&
 Config::compiler() const
 {
-  return m_compiler;
+  return m_data.compiler.get();
 }
 
 inline const std::string&
 Config::compiler_check() const
 {
-  return m_compiler_check;
+  return m_data.compiler_check.get();
 }
 
 inline CompilerType
 Config::compiler_type() const
 {
-  return m_compiler_type;
+  return m_data.compiler_type.get();
 }
 
 inline bool
 Config::is_compiler_group_clang() const
 {
-  return m_compiler_type == CompilerType::clang
+  const auto ct = compiler_type();
+  return ct == CompilerType::clang
 #ifndef _WIN32
-         || m_compiler_type == CompilerType::icx
+         || ct == CompilerType::icx
 #endif
-         || m_compiler_type == CompilerType::clang_cl;
+         || ct == CompilerType::clang_cl;
 }
 
 inline bool
 Config::is_compiler_group_gcc() const
 {
-  return m_compiler_type == CompilerType::gcc
-         || m_compiler_type == CompilerType::qcc;
+  const auto ct = compiler_type();
+  return ct == CompilerType::gcc || ct == CompilerType::qcc;
 }
 
 inline bool
 Config::is_compiler_group_msvc() const
 {
-  return m_compiler_type == CompilerType::msvc
-         || m_compiler_type == CompilerType::clang_cl
-         || m_compiler_type == CompilerType::icl
+  const auto ct = compiler_type();
+  return ct == CompilerType::msvc || ct == CompilerType::clang_cl
+         || ct == CompilerType::icl
 #ifdef _WIN32
-         || m_compiler_type == CompilerType::icx
+         || ct == CompilerType::icx
 #endif
-         || m_compiler_type == CompilerType::icx_cl;
+         || ct == CompilerType::icx_cl;
 }
 
 inline bool
 Config::compression() const
 {
-  return m_compression;
+  return m_data.compression.get();
 }
 
 inline int8_t
 Config::compression_level() const
 {
-  return m_compression_level;
+  return m_data.compression_level.get();
 }
 
 inline bool
 Config::debug() const
 {
-  return m_debug;
+  return m_data.debug.get();
 }
 
 inline const std::filesystem::path&
 Config::debug_dir() const
 {
-  return m_debug_dir;
+  return m_data.debug_dir.get();
 }
 
 inline uint8_t
 Config::debug_level() const
 {
-  return m_debug_level;
+  return m_data.debug_level.get();
 }
 
 inline bool
 Config::depend_mode() const
 {
-  return m_depend_mode;
+  return m_data.depend_mode.get();
 }
 
 inline bool
 Config::direct_mode() const
 {
-  return m_direct_mode;
+  return m_data.direct_mode.get();
 }
 
 inline bool
 Config::disable() const
 {
-  return m_disable;
+  return m_data.disable.get();
 }
 
 inline const std::string&
 Config::extra_files_to_hash() const
 {
-  return m_extra_files_to_hash;
+  return m_data.extra_files_to_hash.get();
 }
 
 inline bool
 Config::file_clone() const
 {
-  return m_file_clone;
+  return m_data.file_clone.get();
 }
 
 inline bool
 Config::hard_link() const
 {
-  return m_hard_link;
+  return m_data.hard_link.get();
 }
 
 inline bool
 Config::hash_dir() const
 {
-  return m_hash_dir;
+  return m_data.hash_dir.get();
 }
 
 inline const std::string&
 Config::ignore_headers_in_manifest() const
 {
-  return m_ignore_headers_in_manifest;
+  return m_data.ignore_headers_in_manifest.get();
 }
 
 inline const std::string&
 Config::ignore_options() const
 {
-  return m_ignore_options;
+  return m_data.ignore_options.get();
 }
 
 inline bool
 Config::inode_cache() const
 {
-  return m_inode_cache;
+  return m_data.inode_cache.get();
 }
 
 inline bool
 Config::keep_comments_cpp() const
 {
-  return m_keep_comments_cpp;
+  return m_data.keep_comments_cpp.get();
 }
 
 inline const std::vector<std::filesystem::path>&
 Config::libexec_dirs() const
 {
-  return m_libexec_dirs;
+  return m_data.libexec_dirs.get();
 }
 
 inline const std::filesystem::path&
 Config::log_file() const
 {
-  return m_log_file;
+  return m_data.log_file.get();
 }
 
 inline uint64_t
 Config::max_files() const
 {
-  return m_max_files;
+  return m_data.max_files.get();
 }
 
 inline uint64_t
 Config::max_size() const
 {
-  return m_max_size;
+  return m_data.max_size.get();
 }
 
 inline const std::string&
 Config::msvc_dep_prefix() const
 {
-  return m_msvc_dep_prefix;
+  return m_data.msvc_dep_prefix.get();
 }
 
 inline bool
 Config::msvc_utf8() const
 {
-  return m_msvc_utf8;
+  return m_data.msvc_utf8.get();
 }
 
 inline const std::string&
 Config::path() const
 {
-  return m_path;
+  return m_data.path.get();
 }
 
 inline bool
 Config::pch_external_checksum() const
 {
-  return m_pch_external_checksum;
+  return m_data.pch_external_checksum.get();
 }
 
 inline const std::string&
 Config::prefix_command() const
 {
-  return m_prefix_command;
+  return m_data.prefix_command.get();
 }
 
 inline const std::string&
 Config::prefix_command_cpp() const
 {
-  return m_prefix_command_cpp;
+  return m_data.prefix_command_cpp.get();
 }
 
 inline bool
 Config::read_only() const
 {
-  return m_read_only;
+  return m_data.read_only.get();
 }
 
 inline bool
 Config::read_only_direct() const
 {
-  return m_read_only_direct;
+  return m_data.read_only_direct.get();
 }
 
 inline bool
 Config::recache() const
 {
-  return m_recache;
+  return m_data.recache.get();
 }
 
 inline bool
 Config::remote_only() const
 {
-  return m_remote_only;
+  return m_data.remote_only.get();
 }
 
 inline const std::string&
 Config::remote_storage() const
 {
-  return m_remote_storage;
+  return m_data.remote_storage.get();
 }
 
 inline bool
 Config::reshare() const
 {
-  return m_reshare;
+  return m_data.reshare.get();
 }
 
 inline util::Args::ResponseFileFormat
 Config::response_file_format() const
 {
-  if (m_response_file_format != util::Args::ResponseFileFormat::auto_guess) {
-    return m_response_file_format;
+  const auto fmt = m_data.response_file_format.get();
+  if (fmt != util::Args::ResponseFileFormat::auto_guess) {
+    return fmt;
   }
 
   return is_compiler_group_msvc() ? util::Args::ResponseFileFormat::windows
@@ -544,43 +879,43 @@ Config::response_file_format() const
 inline const std::vector<std::filesystem::path>&
 Config::safe_dirs() const
 {
-  return m_safe_dirs;
+  return m_data.safe_dirs.get();
 }
 
 inline core::Sloppiness
 Config::sloppiness() const
 {
-  return m_sloppiness;
+  return m_data.sloppiness.get();
 }
 
 inline bool
 Config::stats() const
 {
-  return m_stats;
+  return m_data.stats.get();
 }
 
 inline const std::filesystem::path&
 Config::stats_log() const
 {
-  return m_stats_log;
+  return m_data.stats_log.get();
 }
 
 inline const std::string&
 Config::namespace_() const
 {
-  return m_namespace;
+  return m_data.namespace_.value().get();
 }
 
 inline const std::filesystem::path&
 Config::temporary_dir() const
 {
-  return m_temporary_dir;
+  return m_data.temporary_dir.get();
 }
 
 inline std::optional<mode_t>
 Config::umask() const
 {
-  return m_umask;
+  return m_data.umask.get();
 }
 
 inline util::SizeUnitPrefixType
@@ -598,92 +933,92 @@ Config::set_base_dir(const std::filesystem::path& value)
 inline void
 Config::set_cache_dir(const std::filesystem::path& value)
 {
-  m_cache_dir = util::lexically_normal(value);
+  m_data.cache_dir = util::lexically_normal(value);
   if (!m_temporary_dir_configured_explicitly) {
-    m_temporary_dir = default_temporary_dir();
+    m_data.temporary_dir = default_temporary_dir();
   }
 }
 
 inline void
 Config::set_ceiling_markers(const std::vector<std::filesystem::path>& value)
 {
-  m_ceiling_markers = value;
+  m_data.ceiling_markers = value;
 }
 
 inline void
 Config::set_compiler(const std::string& value)
 {
-  m_compiler = value;
+  m_data.compiler = value;
 }
 
 inline void
 Config::set_compiler_type(CompilerType value)
 {
-  m_compiler_type = value;
+  m_data.compiler_type = value;
 }
 
 inline void
 Config::set_depend_mode(bool value)
 {
-  m_depend_mode = value;
+  m_data.depend_mode = value;
 }
 
 inline void
 Config::set_debug(bool value)
 {
-  m_debug = value;
+  m_data.debug = value;
 }
 
 inline void
 Config::set_direct_mode(bool value)
 {
-  m_direct_mode = value;
+  m_data.direct_mode = value;
 }
 
 inline void
 Config::set_file_clone(const bool value)
 {
-  m_file_clone = value;
+  m_data.file_clone = value;
 }
 
 inline void
 Config::set_hard_link(const bool value)
 {
-  m_hard_link = value;
+  m_data.hard_link = value;
 }
 
 inline void
 Config::set_ignore_options(const std::string& value)
 {
-  m_ignore_options = value;
+  m_data.ignore_options = value;
 }
 
 inline void
 Config::set_inode_cache(bool value)
 {
-  m_inode_cache = value;
+  m_data.inode_cache = value;
 }
 
 inline void
 Config::set_max_files(uint64_t value)
 {
-  m_max_files = value;
+  m_data.max_files = value;
 }
 
 inline void
 Config::set_msvc_dep_prefix(const std::string& value)
 {
-  m_msvc_dep_prefix = value;
+  m_data.msvc_dep_prefix = value;
 }
 
 inline void
 Config::set_msvc_utf8(bool value)
 {
-  m_msvc_utf8 = value;
+  m_data.msvc_utf8 = value;
 }
 
 inline void
 Config::set_temporary_dir(const std::filesystem::path& value)
 {
-  m_temporary_dir = util::lexically_normal(value);
+  m_data.temporary_dir = util::lexically_normal(value);
 }
