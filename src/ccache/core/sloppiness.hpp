@@ -57,6 +57,13 @@ enum class Sloppy : uint32_t {
   incbin = 1U << 13,
 };
 
+constexpr Sloppy
+operator|(Sloppy lhs, Sloppy rhs) noexcept
+{
+  return static_cast<Sloppy>(static_cast<uint32_t>(lhs)
+                             | static_cast<uint32_t>(rhs));
+}
+
 using Sloppiness = util::BitSet<Sloppy>;
 
 } // namespace core

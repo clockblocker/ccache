@@ -721,3 +721,128 @@ TEST_CASE("Check key tables consistency")
 {
   CHECK_NOTHROW(Config::check_key_tables_consistency());
 }
+
+TEST_CASE("Config::json_schema")
+{
+  const std::string schema = Config::json_schema();
+
+  CHECK(schema.find("\"$schema\"") != std::string::npos);
+  CHECK(schema.find("\"properties\"") != std::string::npos);
+  CHECK(schema.find("\"absolute_paths_in_stderr\"") != std::string::npos);
+  CHECK(schema.find("\"compiler_type\"") != std::string::npos);
+  CHECK(schema.find("\"max_size\"") != std::string::npos);
+  CHECK(schema.find("\"namespace\"") != std::string::npos);
+  CHECK(schema.find("\"namespace_\"") == std::string::npos);
+  CHECK(schema.find("\"response_file_format\"") != std::string::npos);
+  CHECK(schema.find("\"sloppiness\"") != std::string::npos);
+  CHECK(schema.find("\"umask\"") != std::string::npos);
+
+  // Descriptions and reflected enum literals / defaults are embedded in schema.
+  CHECK(schema.find("Maximum size of the cache in bytes") != std::string::npos);
+  CHECK(schema.find("Namespace string added to the hash") != std::string::npos);
+  CHECK(schema.find("\"clang-cl\"") != std::string::npos);
+  CHECK(schema.find("\"icx-cl\"") != std::string::npos);
+  CHECK(schema.find("\"windows\"") != std::string::npos);
+  CHECK(schema.find("\"default\"") != std::string::npos);
+}
+
+TEST_CASE("Config::to_json")
+{
+  TestContext test_context;
+
+  REQUIRE(util::write_file(
+    "json.conf",
+    "compiler_type = clang-cl\n"
+    "max_size = 123M\n"
+    "namespace = my_ns\n"
+    "response_file_format = windows\n"
+    "sloppiness = time_macros, modules, incbin\n"
+    "umask = 022\n"));
+
+  Config config;
+  REQUIRE(config.update_from_file("json.conf"));
+
+  const std::string json = config.to_json();
+  CHECK(json.find("\"compiler_type\": \"clang-cl\"") != std::string::npos);
+  CHECK(json.find("\"max_size\": 123000000") != std::string::npos);
+  CHECK(json.find("\"namespace\": \"my_ns\"") != std::string::npos);
+  CHECK(json.find("\"namespace_\"") == std::string::npos);
+  CHECK(json.find("\"response_file_format\": \"windows\"")
+        != std::string::npos);
+  CHECK(json.find("\"sloppiness\": \"incbin, modules, time_macros\"")
+        != std::string::npos);
+  CHECK(json.find("\"umask\": 18") != std::string::npos);
+}
+
+TEST_CASE("Config: legacy aliases and origin provenance")
+{
+  TestContext test_context;
+
+  SUBCASE("secondary_storage key alias in config file")
+  {
+    REQUIRE(
+      util::write_file("alias.conf", "secondary_storage = http://example.com\n"));
+
+    Config config;
+    REQUIRE(config.update_from_file("alias.conf"));
+    CHECK(config.remote_storage() == "http://example.com");
+    CHECK(config.get_string_value("remote_storage") == "http://example.com");
+    CHECK(config.get_string_value("secondary_storage") == "http://example.com");
+
+    size_t count = 0;
+    std::string remote_origin;
+    bool saw_alias = false;
+    config.visit_items(
+      [&](const auto& key, const auto& /*value*/, const auto& origin) {
+        ++count;
+        if (key == "remote_storage") {
+          remote_origin = origin;
+        }
+        if (key == "secondary_storage") {
+          saw_alias = true;
+        }
+      });
+    CHECK(count == 48);
+    CHECK(remote_origin == "alias.conf");
+    CHECK_FALSE(saw_alias);
+  }
+
+  SUBCASE("CCACHE_CC and CCACHE_SECONDARY_STORAGE env aliases")
+  {
+    Config config;
+
+    util::unsetenv("CCACHE_RESHARE");
+    util::setenv("CCACHE_CC", "my-cc");
+    util::setenv("CCACHE_SECONDARY_STORAGE", "file:///tmp/remote");
+    try {
+      config.update_from_environment();
+    } catch (...) {
+      util::unsetenv("CCACHE_CC");
+      util::unsetenv("CCACHE_SECONDARY_STORAGE");
+      throw;
+    }
+    util::unsetenv("CCACHE_CC");
+    util::unsetenv("CCACHE_SECONDARY_STORAGE");
+
+    CHECK(config.compiler() == "my-cc");
+    CHECK(config.remote_storage() == "file:///tmp/remote");
+
+    std::unordered_map<std::string, std::string> origins;
+    config.visit_items(
+      [&](const auto& key, const auto& /*value*/, const auto& origin) {
+        origins.emplace(key, origin);
+      });
+    CHECK(origins["compiler"] == "environment");
+    CHECK(origins["remote_storage"] == "environment");
+    CHECK(origins["reshare"] == "default");
+
+    config.update_from_map({{"secondary_storage", "redis://localhost"}});
+    CHECK(config.remote_storage() == "redis://localhost");
+    origins.clear();
+    config.visit_items(
+      [&](const auto& key, const auto& /*value*/, const auto& origin) {
+        origins.emplace(key, origin);
+      });
+    CHECK(origins["remote_storage"] == "command line");
+  }
+}

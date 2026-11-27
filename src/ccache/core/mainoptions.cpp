@@ -132,7 +132,9 @@ Common options:
                                configuration file
     -x, --show-compression     show compression statistics
     -p, --show-config          show current configuration options in
-                               human-readable format
+                               human-readable format (or JSON with
+                               --format json)
+        --show-config-schema   show JSON Schema for configuration options
         --show-log-stats       print statistics counters from the stats log
                                in human-readable format
     -s, --show-stats           show summary of configuration and statistics
@@ -168,8 +170,9 @@ Options for scripting or debugging:
                                PATH
         --extract-result PATH  extract file data stored in result file at PATH
                                to the current working directory
-        --format FORMAT        specify format for --print-log-stats and
-                               --print-stats (tab, json); default: tab
+        --format FORMAT        specify format for --print-log-stats,
+                               --print-stats, and --show-config (tab, json);
+                               default: tab
     -k, --get-config KEY       print the value of configuration key KEY
         --hash-file PATH       print the hash (160 bit BLAKE3) of the file at
                                PATH
@@ -541,6 +544,7 @@ enum : uint8_t {
   PRINT_LOG_STATS,
   PRINT_STATS,
   PRINT_VERSION,
+  SHOW_CONFIG_SCHEMA,
   SHOW_LOG_STATS,
   STOP_STORAGE_HELPERS,
   THREADS,
@@ -584,6 +588,7 @@ const option long_options[] = {
   {"set-config",              REQUIRED,    nullptr, 'o'                 },
   {"show-compression",        NO_ARGUMENT, nullptr, 'x'                 },
   {"show-config",             NO_ARGUMENT, nullptr, 'p'                 },
+  {"show-config-schema",      NO_ARGUMENT, nullptr, SHOW_CONFIG_SCHEMA  },
   {"show-log-stats",          NO_ARGUMENT, nullptr, SHOW_LOG_STATS      },
   {"show-stats",              NO_ARGUMENT, nullptr, 's'                 },
   {"stop-storage-helpers",    NO_ARGUMENT, nullptr, STOP_STORAGE_HELPERS},
@@ -893,7 +898,15 @@ process_main_options(int argc, const char* const* argv)
     }
 
     case 'p': // --show-config
-      config.visit_items(configuration_printer);
+      if (format == StatisticsFormat::Json) {
+        PRINT(stdout, "{}\n", config.to_json());
+      } else {
+        config.visit_items(configuration_printer);
+      }
+      break;
+
+    case SHOW_CONFIG_SCHEMA:
+      PRINT(stdout, "{}\n", Config::json_schema());
       break;
 
     case SHOW_LOG_STATS: {

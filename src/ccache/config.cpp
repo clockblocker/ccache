@@ -44,15 +44,20 @@
 #  include <unistd.h>
 #endif
 
+#include <rfl.hpp>
+#include <rfl/json.hpp>
 #include <tl/expected.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -72,6 +77,16 @@ namespace fs = util::filesystem;
 
 using util::DirEntry;
 using util::make_path;
+
+namespace config_detail {
+
+const char*
+libexec_dir()
+{
+  return k_libexecdir;
+}
+
+} // namespace config_detail
 
 namespace {
 
@@ -104,197 +119,72 @@ is_safe_compiler_check_value(const std::string& value)
          || value.starts_with("string:");
 }
 
-enum class ConfigItem : uint8_t {
-  absolute_paths_in_stderr,
-  base_dir,
-  cache_dir,
-  ceiling_dirs,
-  ceiling_markers,
-  compiler,
-  compiler_check,
-  compiler_type,
-  compression,
-  compression_level,
-  debug,
-  debug_dir,
-  debug_level,
-  depend_mode,
-  direct_mode,
-  disable,
-  extra_files_to_hash,
-  file_clone,
-  hard_link,
-  hash_dir,
-  ignore_headers_in_manifest,
-  ignore_options,
-  inode_cache,
-  keep_comments_cpp,
-  libexec_dirs,
-  log_file,
-  max_files,
-  max_size,
-  msvc_dep_prefix,
-  msvc_utf8,
-  namespace_,
-  path,
-  pch_external_checksum,
-  prefix_command,
-  prefix_command_cpp,
-  read_only,
-  read_only_direct,
-  recache,
-  remote_only,
-  remote_storage,
-  reshare,
-  response_file_format,
-  safe_dirs,
-  sloppiness,
-  stats,
-  stats_log,
-  temporary_dir,
-  umask,
-};
-
-enum class DirConfigPolicy : uint8_t {
-  allow,  // always allow
-  reject, // always reject with an error
-  unsafe, // allow if config is in directory matching safe_dirs, error otherwise
-};
-
-struct ConfigKeyTableEntry
+std::string
+normalize_enum_name(std::string_view name)
 {
-  ConfigItem item;
-  DirConfigPolicy dir_config_policy;
-  std::optional<std::string_view> alias = std::nullopt;
-};
-
-using C = ConfigItem;
-using DCP = DirConfigPolicy;
-
-// clang-format off
-const std::unordered_map<std::string_view, ConfigKeyTableEntry>
-  k_config_key_table = {
-    {"absolute_paths_in_stderr",   {C::absolute_paths_in_stderr,   DCP::allow}},
-    {"base_dir",                   {C::base_dir,                   DCP::allow}},
-    {"cache_dir",                  {C::cache_dir,                  DCP::reject}},
-    {"ceiling_dirs",               {C::ceiling_dirs,               DCP::reject}},
-    {"ceiling_markers",            {C::ceiling_markers,            DCP::reject}},
-    {"compiler",                   {C::compiler,                   DCP::unsafe}},
-    {"compiler_check",             {C::compiler_check,             DCP::unsafe}}, // exception: some strings allowed
-    {"compiler_type",              {C::compiler_type,              DCP::allow}},
-    {"compression",                {C::compression,                DCP::allow}},
-    {"compression_level",          {C::compression_level,          DCP::allow}},
-    {"debug",                      {C::debug,                      DCP::allow}},
-    {"debug_dir",                  {C::debug_dir,                  DCP::unsafe}},
-    {"debug_level",                {C::debug_level,                DCP::allow}},
-    {"depend_mode",                {C::depend_mode,                DCP::allow}},
-    {"direct_mode",                {C::direct_mode,                DCP::allow}},
-    {"disable",                    {C::disable,                    DCP::allow}},
-    {"extra_files_to_hash",        {C::extra_files_to_hash,        DCP::allow}},
-    {"file_clone",                 {C::file_clone,                 DCP::allow}},
-    {"hard_link",                  {C::hard_link,                  DCP::allow}},
-    {"hash_dir",                   {C::hash_dir,                   DCP::allow}},
-    {"ignore_headers_in_manifest", {C::ignore_headers_in_manifest, DCP::allow}},
-    {"ignore_options",             {C::ignore_options,             DCP::allow}},
-    {"inode_cache",                {C::inode_cache,                DCP::allow}},
-    {"keep_comments_cpp",          {C::keep_comments_cpp,          DCP::allow}},
-    {"libexec_dirs",               {C::libexec_dirs,               DCP::unsafe}},
-    {"log_file",                   {C::log_file,                   DCP::unsafe}},
-    {"max_files",                  {C::max_files,                  DCP::reject}},
-    {"max_size",                   {C::max_size,                   DCP::reject}},
-    {"msvc_dep_prefix",            {C::msvc_dep_prefix,            DCP::allow}},
-    {"msvc_utf8",                  {C::msvc_utf8,                  DCP::allow}},
-    {"namespace",                  {C::namespace_,                 DCP::allow}},
-    {"path",                       {C::path,                       DCP::unsafe}},
-    {"pch_external_checksum",      {C::pch_external_checksum,      DCP::allow}},
-    {"prefix_command",             {C::prefix_command,             DCP::unsafe}},
-    {"prefix_command_cpp",         {C::prefix_command_cpp,         DCP::unsafe}},
-    {"read_only",                  {C::read_only,                  DCP::allow}},
-    {"read_only_direct",           {C::read_only_direct,           DCP::allow}},
-    {"recache",                    {C::recache,                    DCP::allow}},
-    {"remote_only",                {C::remote_only,                DCP::allow}},
-    {"remote_storage",             {C::remote_storage,             DCP::unsafe}},
-    {"reshare",                    {C::reshare,                    DCP::allow}},
-    {"response_file_format",       {C::response_file_format,       DCP::allow}},
-    {"safe_dirs",                  {C::safe_dirs,                  DCP::reject}},
-    {"secondary_storage",          {C::remote_storage,             DCP::unsafe, "remote_storage"}},
-    {"sloppiness",                 {C::sloppiness,                 DCP::allow}},
-    {"stats",                      {C::stats,                      DCP::allow}},
-    {"stats_log",                  {C::stats_log,                  DCP::unsafe}},
-    {"temporary_dir",              {C::temporary_dir,              DCP::unsafe}},
-    {"umask",                      {C::umask,                      DCP::unsafe}},
-};
-// clang-format on
-
-const std::unordered_map<std::string_view, std::string_view>
-  k_env_variable_table = {
-    {"ABSSTDERR",            "absolute_paths_in_stderr"  },
-    {"BASEDIR",              "base_dir"                  },
-    {"CC",                   "compiler"                  }, // Alias for CCACHE_COMPILER
-    {"CEILING_DIRS",         "ceiling_dirs"              },
-    {"CEILING_MARKERS",      "ceiling_markers"           },
-    {"COMMENTS",             "keep_comments_cpp"         },
-    {"COMPILER",             "compiler"                  },
-    {"COMPILERCHECK",        "compiler_check"            },
-    {"COMPILERTYPE",         "compiler_type"             },
-    {"COMPRESS",             "compression"               },
-    {"COMPRESSLEVEL",        "compression_level"         },
-    {"DEBUG",                "debug"                     },
-    {"DEBUGDIR",             "debug_dir"                 },
-    {"DEBUGLEVEL",           "debug_level"               },
-    {"DEPEND",               "depend_mode"               },
-    {"DIR",                  "cache_dir"                 },
-    {"DIRECT",               "direct_mode"               },
-    {"DISABLE",              "disable"                   },
-    {"EXTRAFILES",           "extra_files_to_hash"       },
-    {"FILECLONE",            "file_clone"                },
-    {"HARDLINK",             "hard_link"                 },
-    {"HASHDIR",              "hash_dir"                  },
-    {"IGNOREHEADERS",        "ignore_headers_in_manifest"},
-    {"IGNOREOPTIONS",        "ignore_options"            },
-    {"INODECACHE",           "inode_cache"               },
-    {"LIBEXEC_DIRS",         "libexec_dirs"              },
-    {"LOGFILE",              "log_file"                  },
-    {"MAXFILES",             "max_files"                 },
-    {"MAXSIZE",              "max_size"                  },
-    {"MSVC_DEP_PREFIX",      "msvc_dep_prefix"           },
-    {"MSVC_UTF8",            "msvc_utf8"                 },
-    {"NAMESPACE",            "namespace"                 },
-    {"PATH",                 "path"                      },
-    {"PCH_EXTSUM",           "pch_external_checksum"     },
-    {"PREFIX",               "prefix_command"            },
-    {"PREFIX_CPP",           "prefix_command_cpp"        },
-    {"READONLY",             "read_only"                 },
-    {"READONLY_DIRECT",      "read_only_direct"          },
-    {"RECACHE",              "recache"                   },
-    {"REMOTE_ONLY",          "remote_only"               },
-    {"REMOTE_STORAGE",       "remote_storage"            },
-    {"RESHARE",              "reshare"                   },
-    {"RESPONSE_FILE_FORMAT", "response_file_format"      },
-    {"SECONDARY_STORAGE",    "remote_storage"            }, // Alias for CCACHE_REMOTE_STORAGE
-    {"SAFE_DIRS",            "safe_dirs"                 },
-    {"SLOPPINESS",           "sloppiness"                },
-    {"STATS",                "stats"                     },
-    {"STATSLOG",             "stats_log"                 },
-    {"TEMPDIR",              "temporary_dir"             },
-    {"UMASK",                "umask"                     },
-};
-
-util::Args::ResponseFileFormat
-parse_response_file_format(const std::string& value)
-{
-  if (value == "posix") {
-    return util::Args::ResponseFileFormat::posix;
-  } else if (value == "windows") {
-    return util::Args::ResponseFileFormat::windows;
-  } else {
-    return util::Args::ResponseFileFormat::auto_guess;
+  if (name == "auto_guess") {
+    return "auto";
   }
+  std::string result(name);
+  std::replace(result.begin(), result.end(), '_', '-');
+  return result;
+}
+
+template<class Enum>
+Enum
+parse_config_enum(const std::string& value)
+{
+  constexpr auto entries = rfl::get_enumerator_array<Enum>();
+  for (const auto& [name, enumerator] : entries) {
+    if (normalize_enum_name(name) == value) {
+      return enumerator;
+    }
+  }
+  // Allow any unknown value for forward compatibility.
+  return Enum::auto_guess;
+}
+
+template<class Enum>
+std::string
+format_config_enum(Enum value)
+{
+  constexpr auto entries = rfl::get_enumerator_array<Enum>();
+  for (const auto& [name, enumerator] : entries) {
+    if (enumerator == value) {
+      return normalize_enum_name(name);
+    }
+  }
+  ASSERT(false);
+}
+
+static_assert(rfl::get_enumerator_array<CompilerType>().size() == 11);
+static_assert(
+  rfl::get_enumerator_array<util::Args::ResponseFileFormat>().size() == 3);
+static_assert(rfl::get_enumerator_array<core::Sloppy>().size() == 15);
+
+const std::vector<std::pair<std::string_view, core::Sloppy>>&
+sloppiness_entries()
+{
+  static const auto entries = [] {
+    constexpr auto raw = rfl::get_enumerator_array<core::Sloppy>();
+    std::vector<std::pair<std::string_view, core::Sloppy>> sorted;
+    sorted.reserve(raw.size());
+    for (const auto& [name, flag] : raw) {
+      if (flag != core::Sloppy::none) {
+        sorted.emplace_back(name, flag);
+      }
+    }
+    std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
+      return a.first < b.first;
+    });
+    return sorted;
+  }();
+  return entries;
 }
 
 bool
 parse_bool(const std::string& value,
-           const std::optional<std::string> env_var_key,
+           const std::optional<std::string>& env_var_key,
            bool negate)
 {
   if (env_var_key) {
@@ -331,70 +221,24 @@ format_bool(bool value)
   return value ? "true" : "false";
 }
 
-CompilerType
-parse_compiler_type(const std::string& value)
-{
-  if (value == "clang") {
-    return CompilerType::clang;
-  } else if (value == "clang-cl") {
-    return CompilerType::clang_cl;
-  } else if (value == "gcc") {
-    return CompilerType::gcc;
-  } else if (value == "icl") {
-    return CompilerType::icl;
-  } else if (value == "icx") {
-    return CompilerType::icx;
-  } else if (value == "icx-cl") {
-    return CompilerType::icx_cl;
-  } else if (value == "msvc") {
-    return CompilerType::msvc;
-  } else if (value == "nvcc") {
-    return CompilerType::nvcc;
-  } else if (value == "qcc") {
-    return CompilerType::qcc;
-  } else if (value == "other") {
-    return CompilerType::other;
-  } else {
-    // Allow any unknown value for forward compatibility.
-    return CompilerType::auto_guess;
-  }
-}
-
 core::Sloppiness
 parse_sloppiness(const std::string& value)
 {
   core::Sloppiness result;
+  const auto& entries = sloppiness_entries();
 
   for (const auto token : util::Tokenizer(value, ", ")) {
-    if (token == "clang_index_store") {
-      result.insert(core::Sloppy::clang_index_store);
-    } else if (token == "file_stat_matches") {
-      result.insert(core::Sloppy::file_stat_matches);
-    } else if (token == "file_stat_matches_ctime") {
-      result.insert(core::Sloppy::file_stat_matches_ctime);
-    } else if (token == "gcno_cwd") {
-      result.insert(core::Sloppy::gcno_cwd);
-    } else if (token == "incbin") {
-      result.insert(core::Sloppy::incbin);
-    } else if (token == "include_file_ctime") {
-      result.insert(core::Sloppy::include_file_ctime);
-    } else if (token == "include_file_mtime") {
-      result.insert(core::Sloppy::include_file_mtime);
-    } else if (token == "ivfsoverlay") {
-      result.insert(core::Sloppy::ivfsoverlay);
-    } else if (token == "locale") {
-      result.insert(core::Sloppy::locale);
-    } else if (token == "modules") {
-      result.insert(core::Sloppy::modules);
-    } else if (token == "pch_defines") {
-      result.insert(core::Sloppy::pch_defines);
-    } else if (token == "random_seed") {
-      result.insert(core::Sloppy::random_seed);
-    } else if (token == "system_headers" || token == "no_system_headers") {
+    if (token == "no_system_headers") {
       result.insert(core::Sloppy::system_headers);
-    } else if (token == "time_macros") {
-      result.insert(core::Sloppy::time_macros);
-    } // else: ignore unknown value for forward compatibility
+      continue;
+    }
+    for (const auto& [name, flag] : entries) {
+      if (token == name) {
+        result.insert(flag);
+        break;
+      }
+    }
+    // else: ignore unknown value for forward compatibility
   }
 
   return result;
@@ -404,51 +248,13 @@ std::string
 format_sloppiness(core::Sloppiness sloppiness)
 {
   std::string result;
-  if (sloppiness.contains(core::Sloppy::clang_index_store)) {
-    result += "clang_index_store, ";
-  }
-  if (sloppiness.contains(core::Sloppy::file_stat_matches)) {
-    result += "file_stat_matches, ";
-  }
-  if (sloppiness.contains(core::Sloppy::file_stat_matches_ctime)) {
-    result += "file_stat_matches_ctime, ";
-  }
-  if (sloppiness.contains(core::Sloppy::gcno_cwd)) {
-    result += "gcno_cwd, ";
-  }
-  if (sloppiness.contains(core::Sloppy::incbin)) {
-    result += "incbin, ";
-  }
-  if (sloppiness.contains(core::Sloppy::include_file_ctime)) {
-    result += "include_file_ctime, ";
-  }
-  if (sloppiness.contains(core::Sloppy::include_file_mtime)) {
-    result += "include_file_mtime, ";
-  }
-  if (sloppiness.contains(core::Sloppy::ivfsoverlay)) {
-    result += "ivfsoverlay, ";
-  }
-  if (sloppiness.contains(core::Sloppy::locale)) {
-    result += "locale, ";
-  }
-  if (sloppiness.contains(core::Sloppy::modules)) {
-    result += "modules, ";
-  }
-  if (sloppiness.contains(core::Sloppy::pch_defines)) {
-    result += "pch_defines, ";
-  }
-  if (sloppiness.contains(core::Sloppy::random_seed)) {
-    result += "random_seed, ";
-  }
-  if (sloppiness.contains(core::Sloppy::system_headers)) {
-    result += "system_headers, ";
-  }
-  if (sloppiness.contains(core::Sloppy::time_macros)) {
-    result += "time_macros, ";
-  }
-  if (!result.empty()) {
-    // Strip last ", ".
-    result.resize(result.size() - 2);
+  for (const auto& [name, flag] : sloppiness_entries()) {
+    if (sloppiness.contains(flag)) {
+      if (!result.empty()) {
+        result += ", ";
+      }
+      result += name;
+    }
   }
   return result;
 }
@@ -568,40 +374,370 @@ std::string
 response_file_format_to_string(
   util::Args::ResponseFileFormat response_file_format)
 {
-  switch (response_file_format) {
-  case util::Args::ResponseFileFormat::auto_guess:
-    return "auto";
-  case util::Args::ResponseFileFormat::posix:
-    return "posix";
-  case util::Args::ResponseFileFormat::windows:
-    return "windows";
-  }
-
-  ASSERT(false);
+  return format_config_enum(response_file_format);
 }
 
+template<class T>
+struct UnwrapRename
+{
+  using Type = T;
+};
+
+template<rfl::internal::StringLiteral Name, class T>
+struct UnwrapRename<rfl::Rename<Name, T>>
+{
+  using Type = T;
+};
+
+template<class T>
+using UnwrapRenameT = typename UnwrapRename<std::remove_cvref_t<T>>::Type;
+
+template<class T>
+decltype(auto)
+unwrap_option(T& opt) noexcept
+{
+  if constexpr (rfl::internal::is_rename_v<std::remove_cvref_t<T>>) {
+    return opt.value();
+  } else {
+    return opt;
+  }
+}
+
+template<class View, size_t... Is>
+consteval bool
+are_view_fields_sorted(std::index_sequence<Is...>)
+{
+  constexpr std::array<std::string_view, sizeof...(Is)> names = {
+    rfl::tuple_element_t<Is, typename View::Fields>::name()...};
+  for (size_t i = 1; i < names.size(); ++i) {
+    if (!(names[i - 1] < names[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+using ConfigView = rfl::view_t<ConfigData>;
+static_assert(std::is_aggregate_v<ConfigData>);
+static_assert(rfl::num_fields<ConfigData> == 48);
+static_assert(
+  are_view_fields_sorted<ConfigView>(
+    std::make_index_sequence<rfl::num_fields<ConfigData>>{}),
+  "ConfigData fields must be declared in strict alphabetical order of "
+  "canonical keys");
+
 } // namespace
+
+namespace rfl {
+
+template<>
+struct Reflector<CompilerType>
+{
+  using ReflType = rfl::Literal<"auto",
+                                "clang",
+                                "clang-cl",
+                                "gcc",
+                                "icl",
+                                "icx",
+                                "icx-cl",
+                                "msvc",
+                                "nvcc",
+                                "qcc",
+                                "other">;
+
+  static ReflType
+  from(const CompilerType& v)
+  {
+    return ReflType(compiler_type_to_string(v));
+  }
+
+  static CompilerType
+  to(const ReflType& v)
+  {
+    return parse_config_enum<CompilerType>(v.str());
+  }
+};
+
+template<>
+struct Reflector<util::Args::ResponseFileFormat>
+{
+  using ReflType = rfl::Literal<"auto", "posix", "windows">;
+
+  static ReflType
+  from(const util::Args::ResponseFileFormat& v)
+  {
+    return ReflType(response_file_format_to_string(v));
+  }
+
+  static util::Args::ResponseFileFormat
+  to(const ReflType& v)
+  {
+    return parse_config_enum<util::Args::ResponseFileFormat>(v.str());
+  }
+};
+
+template<>
+struct Reflector<core::Sloppiness>
+{
+  using ReflType = std::string;
+
+  static ReflType
+  from(const core::Sloppiness& v)
+  {
+    return format_sloppiness(v);
+  }
+
+  static core::Sloppiness
+  to(const ReflType& v)
+  {
+    return parse_sloppiness(v);
+  }
+};
+
+} // namespace rfl
+
+namespace config_detail {
+
+using ConfigConstView = decltype(rfl::to_view(std::declval<const ConfigData&>()));
+using ConfigMutView = decltype(rfl::to_view(std::declval<ConfigData&>()));
+
+struct ConfigMeta
+{
+  struct KeyInfo
+  {
+    std::string_view canonical_key;
+    DirConfigPolicy dir_config_policy;
+    std::string (*format_fn)(const Config&, const ConfigConstView&);
+    void (*set_fn)(Config&,
+                   ConfigMutView&,
+                   const std::string& value,
+                   const std::optional<std::string>& env_var_key,
+                   bool negate);
+  };
+
+  std::unordered_map<std::string_view, KeyInfo> key_info;
+  std::unordered_map<std::string_view, std::string_view> env_to_key;
+
+  template<class T>
+  static std::string
+  format_field(const Config& cfg, std::string_view key, const T& val)
+  {
+    if constexpr (std::is_same_v<T, bool>) {
+      return format_bool(val);
+    } else if constexpr (std::is_same_v<T, std::string>) {
+      return val;
+    } else if constexpr (std::is_same_v<T, std::filesystem::path>) {
+      return val.string();
+    } else if constexpr (std::is_same_v<T, std::vector<std::filesystem::path>>) {
+      return util::join_path_list(val);
+    } else if constexpr (std::is_same_v<T, CompilerType>) {
+      return compiler_type_to_string(val);
+    } else if constexpr (std::is_same_v<T, util::Args::ResponseFileFormat>) {
+      return response_file_format_to_string(val);
+    } else if constexpr (std::is_same_v<T, core::Sloppiness>) {
+      return format_sloppiness(val);
+    } else if constexpr (std::is_same_v<T, std::optional<mode_t>>) {
+      return format_umask(val);
+    } else if constexpr (std::is_same_v<T, uint64_t>) {
+      if (key == "max_size") {
+        auto result =
+          util::format_human_readable_size(val, cfg.m_size_prefix_type);
+        if (result.ends_with(" bytes")) {
+          // Special case to make the output parsable by util::parse_size.
+          result.resize(result.size() - 6);
+        }
+        return result;
+      }
+      return FMT("{}", val);
+    } else {
+      return FMT("{}", val);
+    }
+  }
+
+  template<class T>
+  static void
+  set_field(Config& cfg,
+            std::string_view key,
+            T& field,
+            const std::string& value,
+            const std::optional<std::string>& env_var_key,
+            bool negate)
+  {
+    if constexpr (std::is_same_v<T, bool>) {
+      field = parse_bool(value, env_var_key, negate);
+    } else if constexpr (std::is_same_v<T, std::string>) {
+      field = value;
+    } else if constexpr (std::is_same_v<T, std::filesystem::path>) {
+      if (key == "cache_dir") {
+        cfg.set_cache_dir(value);
+      } else if (key == "temporary_dir") {
+        field = value;
+        cfg.m_temporary_dir_configured_explicitly = true;
+      } else {
+        field = value;
+      }
+    } else if constexpr (std::is_same_v<T, std::vector<std::filesystem::path>>) {
+      if (key == "base_dir") {
+        cfg.set_base_dirs(util::split_path_list(value));
+      } else if (key == "ceiling_dirs") {
+        cfg.set_ceiling_dirs(util::split_path_list(value));
+      } else if (key == "safe_dirs") {
+        cfg.set_safe_dirs(util::split_path_list(value));
+      } else {
+        field = util::split_path_list(value);
+      }
+    } else if constexpr (std::is_same_v<T, int8_t>) {
+      field = static_cast<int8_t>(util::value_or_throw<core::Error>(
+        util::parse_signed(value, INT8_MIN, INT8_MAX, key)));
+    } else if constexpr (std::is_same_v<T, uint8_t>) {
+      const std::string_view label =
+        (key == "debug_level") ? "debug level" : key;
+      field = static_cast<uint8_t>(util::value_or_throw<core::Error>(
+        util::parse_unsigned(value, 0, UINT8_MAX, label)));
+    } else if constexpr (std::is_same_v<T, uint64_t>) {
+      if (key == "max_size") {
+        const auto [size, prefix_type] =
+          util::value_or_throw<core::Error>(util::parse_size(value));
+        field = size;
+        cfg.m_size_prefix_type = prefix_type;
+      } else {
+        field = util::value_or_throw<core::Error>(
+          util::parse_unsigned(value, std::nullopt, std::nullopt, key));
+      }
+    } else if constexpr (std::is_same_v<T, CompilerType>) {
+      field = parse_config_enum<CompilerType>(value);
+    } else if constexpr (std::is_same_v<T, util::Args::ResponseFileFormat>) {
+      field = parse_config_enum<util::Args::ResponseFileFormat>(value);
+    } else if constexpr (std::is_same_v<T, core::Sloppiness>) {
+      field = parse_sloppiness(value);
+    } else if constexpr (std::is_same_v<T, std::optional<mode_t>>) {
+      if (!value.empty()) {
+        field = util::value_or_throw<core::Error>(util::parse_umask(value));
+      }
+    }
+  }
+
+  template<size_t I>
+  static void
+  register_field(ConfigMeta& meta)
+  {
+    using Field = rfl::tuple_element_t<I, typename ConfigView::Fields>;
+    using RawFieldT = std::remove_pointer_t<typename Field::Type>;
+    using OptionT = UnwrapRenameT<RawFieldT>;
+    constexpr std::string_view key = Field::name();
+
+    auto* const format_fn =
+      +[](const Config& cfg, const ConfigConstView& view) -> std::string {
+      const auto& opt = unwrap_option(*rfl::get<static_cast<int>(I)>(view));
+      return format_field(cfg, Field::name(), opt.get());
+    };
+    auto* const set_fn = +[](Config& cfg,
+                             ConfigMutView& view,
+                             const std::string& val,
+                             const std::optional<std::string>& env_var_key,
+                             bool negate) {
+      auto& opt = unwrap_option(*rfl::get<static_cast<int>(I)>(view));
+      set_field(cfg, Field::name(), opt.get(), val, env_var_key, negate);
+    };
+
+    const KeyInfo info{key, OptionT::dir_policy, format_fn, set_fn};
+    meta.key_info.emplace(key, info);
+    if constexpr (!OptionT::key_alias.empty()) {
+      meta.key_info.emplace(OptionT::key_alias, info);
+    }
+    if constexpr (!OptionT::env_var.empty()) {
+      meta.env_to_key.emplace(OptionT::env_var, key);
+    }
+    if constexpr (!OptionT::env_alias.empty()) {
+      meta.env_to_key.emplace(OptionT::env_alias, key);
+    }
+  }
+
+  template<size_t... Is>
+  static ConfigMeta
+  build(std::index_sequence<Is...>)
+  {
+    ConfigMeta meta;
+    meta.key_info.reserve(sizeof...(Is) + 4);
+    meta.env_to_key.reserve(sizeof...(Is) + 4);
+    (register_field<Is>(meta), ...);
+    return meta;
+  }
+
+  template<size_t... Is>
+  static void
+  check_consistency(std::index_sequence<Is...>)
+  {
+    std::unordered_set<std::string_view> seen_keys;
+    std::unordered_set<std::string_view> seen_env_vars;
+
+    auto check_one = [&]<size_t I>() {
+      using Field = rfl::tuple_element_t<I, typename ConfigView::Fields>;
+      using RawFieldT = std::remove_pointer_t<typename Field::Type>;
+      using OptionT = UnwrapRenameT<RawFieldT>;
+      constexpr std::string_view key = Field::name();
+
+      if (!seen_keys.insert(key).second) {
+        throw core::Error(FMT("duplicate config key \"{}\"", key));
+      }
+      if constexpr (!OptionT::key_alias.empty()) {
+        if (!seen_keys.insert(OptionT::key_alias).second) {
+          throw core::Error(
+            FMT("duplicate config key alias \"{}\"", OptionT::key_alias));
+        }
+      }
+      if constexpr (OptionT::env_var.empty()) {
+        throw core::Error(FMT("missing env var for config key \"{}\"", key));
+      } else {
+        if (!seen_env_vars.insert(OptionT::env_var).second) {
+          throw core::Error(
+            FMT("duplicate env var \"{}\"", OptionT::env_var));
+        }
+      }
+      if constexpr (!OptionT::env_alias.empty()) {
+        if (!seen_env_vars.insert(OptionT::env_alias).second) {
+          throw core::Error(
+            FMT("duplicate env var alias \"{}\"", OptionT::env_alias));
+        }
+      }
+    };
+
+    (check_one.template operator()<Is>(), ...);
+  }
+};
+
+const ConfigMeta&
+reflected_config_meta()
+{
+  static const ConfigMeta meta = ConfigMeta::build(
+    std::make_index_sequence<rfl::num_fields<ConfigData>>{});
+  return meta;
+}
+
+} // namespace config_detail
 
 void
 Config::set_ceiling_dirs(const std::vector<std::filesystem::path>& value)
 {
-  m_ceiling_dirs.clear();
+  auto& dirs = m_data.ceiling_dirs.get();
+  dirs.clear();
   for (const auto& path : value) {
     verify_absolute_path(path);
-    m_ceiling_dirs.push_back(util::lexically_normal(path));
+    dirs.push_back(util::lexically_normal(path));
   }
 }
 
 void
 Config::set_safe_dirs(const std::vector<std::filesystem::path>& value)
 {
-  m_safe_dirs.clear();
+  auto& dirs = m_data.safe_dirs.get();
+  dirs.clear();
   for (const auto& path : value) {
     if (path == "*") {
-      m_safe_dirs.push_back(path);
+      dirs.push_back(path);
     } else {
       verify_absolute_path(path);
-      m_safe_dirs.push_back(util::lexically_normal(path));
+      dirs.push_back(util::lexically_normal(path));
     }
   }
 }
@@ -609,30 +745,7 @@ Config::set_safe_dirs(const std::vector<std::filesystem::path>& value)
 std::string
 compiler_type_to_string(CompilerType compiler_type)
 {
-#define CASE(type)                                                             \
-  case CompilerType::type:                                                     \
-    return #type
-
-  switch (compiler_type) {
-  case CompilerType::auto_guess:
-    return "auto";
-  case CompilerType::clang_cl:
-    return "clang-cl";
-  case CompilerType::icx_cl:
-    return "icx-cl";
-
-    CASE(clang);
-    CASE(gcc);
-    CASE(icl);
-    CASE(icx);
-    CASE(msvc);
-    CASE(nvcc);
-    CASE(qcc);
-    CASE(other);
-  }
-#undef CASE
-
-  ASSERT(false);
+  return format_config_enum(compiler_type);
 }
 
 void
@@ -785,13 +898,25 @@ Config::read(const std::vector<std::string>& cmdline_config_settings)
 const char*
 Config::libexec_dir()
 {
-  return k_libexecdir;
+  return config_detail::libexec_dir();
 }
 
 const char*
 Config::sysconf_dir()
 {
   return k_sysconfdir;
+}
+
+std::string
+Config::json_schema()
+{
+  return rfl::json::to_schema<ConfigData>(rfl::json::pretty);
+}
+
+std::string
+Config::to_json() const
+{
+  return rfl::json::write(m_data, rfl::json::pretty);
 }
 
 const fs::path&
@@ -815,10 +940,11 @@ Config::system_config_path() const
 void
 Config::set_base_dirs(const std::vector<std::filesystem::path>& value)
 {
-  m_base_dirs.clear();
+  auto& dirs = m_data.base_dir.get();
+  dirs.clear();
   for (const auto& path : value) {
     verify_absolute_path(path);
-    m_base_dirs.push_back(util::lexically_normal(path));
+    dirs.push_back(util::lexically_normal(path));
   }
 }
 
@@ -879,7 +1005,8 @@ Config::update_from_dir_config_file(const fs::path& path)
   util::ConfigReader reader(*config_content);
 
   const fs::path dir = path.parent_path();
-  const bool allow_unsafe = is_under_any_safe_dir(dir, m_safe_dirs);
+  const bool allow_unsafe = is_under_any_safe_dir(dir, m_data.safe_dirs.get());
+  const auto& meta = config_detail::reflected_config_meta();
 
   while (true) {
     auto item_result = reader.read_next_item();
@@ -895,8 +1022,8 @@ Config::update_from_dir_config_file(const fs::path& path)
       break; // EOF
     }
 
-    const auto it = k_config_key_table.find(item->key);
-    if (it == k_config_key_table.end()) {
+    const auto it = meta.key_info.find(item->key);
+    if (it == meta.key_info.end()) {
       throw core::Error(FMT("{}:{}: unknown configuration option \"{}\"",
                             path,
                             item->line_number,
@@ -914,7 +1041,7 @@ Config::update_from_dir_config_file(const fs::path& path)
     }
 
     if (policy == DirConfigPolicy::unsafe && !allow_unsafe) {
-      if (it->second.item == ConfigItem::compiler_check) {
+      if (it->second.canonical_key == "compiler_check") {
         // Value-dependent exception: allow compiler_check as long as it doesn't
         // invoke a command.
         auto expanded_value = util::expand_environment_variables(item->value);
@@ -967,6 +1094,8 @@ Config::update_from_map(const std::unordered_map<std::string, std::string>& map)
 void
 Config::update_from_environment()
 {
+  const auto& meta = config_detail::reflected_config_meta();
+
   for (char** env = environ; *env; ++env) {
     std::string setting = *env;
     const std::string prefix = "CCACHE_";
@@ -985,8 +1114,8 @@ Config::update_from_environment()
       key = key.substr(2);
     }
 
-    auto it = k_env_variable_table.find(key);
-    if (it == k_env_variable_table.end()) {
+    auto it = meta.env_to_key.find(key);
+    if (it == meta.env_to_key.end()) {
       // Ignore unknown keys.
       continue;
     }
@@ -1004,165 +1133,13 @@ Config::update_from_environment()
 std::string
 Config::get_string_value(const std::string& key) const
 {
-  auto it = k_config_key_table.find(key);
-  if (it == k_config_key_table.end()) {
+  const auto& meta = config_detail::reflected_config_meta();
+  const auto it = meta.key_info.find(key);
+  if (it == meta.key_info.end()) {
     throw core::Error(FMT("unknown configuration option \"{}\"", key));
   }
-
-  switch (it->second.item) {
-  case ConfigItem::absolute_paths_in_stderr:
-    return format_bool(m_absolute_paths_in_stderr);
-
-  case ConfigItem::base_dir:
-    return util::join_path_list(m_base_dirs);
-
-  case ConfigItem::cache_dir:
-    return m_cache_dir.string();
-
-  case ConfigItem::ceiling_dirs:
-    return util::join_path_list(m_ceiling_dirs);
-
-  case ConfigItem::ceiling_markers:
-    return util::join_path_list(m_ceiling_markers);
-
-  case ConfigItem::compiler:
-    return m_compiler;
-
-  case ConfigItem::compiler_check:
-    return m_compiler_check;
-
-  case ConfigItem::compiler_type:
-    return compiler_type_to_string(m_compiler_type);
-
-  case ConfigItem::compression:
-    return format_bool(m_compression);
-
-  case ConfigItem::compression_level:
-    return FMT("{}", m_compression_level);
-
-  case ConfigItem::debug:
-    return format_bool(m_debug);
-
-  case ConfigItem::debug_dir:
-    return m_debug_dir.string();
-
-  case ConfigItem::debug_level:
-    return FMT("{}", m_debug_level);
-
-  case ConfigItem::depend_mode:
-    return format_bool(m_depend_mode);
-
-  case ConfigItem::direct_mode:
-    return format_bool(m_direct_mode);
-
-  case ConfigItem::disable:
-    return format_bool(m_disable);
-
-  case ConfigItem::extra_files_to_hash:
-    return m_extra_files_to_hash;
-
-  case ConfigItem::file_clone:
-    return format_bool(m_file_clone);
-
-  case ConfigItem::hard_link:
-    return format_bool(m_hard_link);
-
-  case ConfigItem::hash_dir:
-    return format_bool(m_hash_dir);
-
-  case ConfigItem::ignore_headers_in_manifest:
-    return m_ignore_headers_in_manifest;
-
-  case ConfigItem::ignore_options:
-    return m_ignore_options;
-
-  case ConfigItem::inode_cache:
-    return format_bool(m_inode_cache);
-
-  case ConfigItem::keep_comments_cpp:
-    return format_bool(m_keep_comments_cpp);
-
-  case ConfigItem::libexec_dirs:
-    return util::join_path_list(m_libexec_dirs);
-
-  case ConfigItem::log_file:
-    return m_log_file.string();
-
-  case ConfigItem::max_files:
-    return FMT("{}", m_max_files);
-
-  case ConfigItem::max_size: {
-    auto result =
-      util::format_human_readable_size(m_max_size, m_size_prefix_type);
-    if (result.ends_with(" bytes")) {
-      // Special case to make the output parsable by util::parse_size.
-      result.resize(result.size() - 6);
-    }
-    return result;
-  }
-
-  case ConfigItem::msvc_dep_prefix:
-    return m_msvc_dep_prefix;
-
-  case ConfigItem::msvc_utf8:
-    return format_bool(m_msvc_utf8);
-
-  case ConfigItem::namespace_:
-    return m_namespace;
-
-  case ConfigItem::path:
-    return m_path;
-
-  case ConfigItem::pch_external_checksum:
-    return format_bool(m_pch_external_checksum);
-
-  case ConfigItem::prefix_command:
-    return m_prefix_command;
-
-  case ConfigItem::prefix_command_cpp:
-    return m_prefix_command_cpp;
-
-  case ConfigItem::read_only:
-    return format_bool(m_read_only);
-
-  case ConfigItem::read_only_direct:
-    return format_bool(m_read_only_direct);
-
-  case ConfigItem::recache:
-    return format_bool(m_recache);
-
-  case ConfigItem::remote_only:
-    return format_bool(m_remote_only);
-
-  case ConfigItem::remote_storage:
-    return m_remote_storage;
-
-  case ConfigItem::reshare:
-    return format_bool(m_reshare);
-
-  case ConfigItem::response_file_format:
-    return response_file_format_to_string(m_response_file_format);
-
-  case ConfigItem::safe_dirs:
-    return util::join_path_list(m_safe_dirs);
-
-  case ConfigItem::sloppiness:
-    return format_sloppiness(m_sloppiness);
-
-  case ConfigItem::stats:
-    return format_bool(m_stats);
-
-  case ConfigItem::stats_log:
-    return m_stats_log.string();
-
-  case ConfigItem::temporary_dir:
-    return m_temporary_dir.string();
-
-  case ConfigItem::umask:
-    return format_umask(m_umask);
-  }
-
-  ASSERT(false); // Never reached
+  const auto view = rfl::to_view(m_data);
+  return it->second.format_fn(*this, view);
 }
 
 void
@@ -1170,9 +1147,10 @@ Config::set_value_in_file(const std::string& path,
                           const std::string& key,
                           const std::string& value) const
 {
-  util::UmaskScope umask_scope(m_umask);
+  util::UmaskScope umask_scope(m_data.umask.get());
 
-  if (k_config_key_table.find(key) == k_config_key_table.end()) {
+  const auto& meta = config_detail::reflected_config_meta();
+  if (meta.key_info.find(key) == meta.key_info.end()) {
     throw core::Error(FMT("unknown configuration option \"{}\"", key));
   }
 
@@ -1239,20 +1217,17 @@ Config::set_value_in_file(const std::string& path,
 void
 Config::visit_items(const ItemVisitor& item_visitor) const
 {
-  std::vector<std::string> keys;
-  keys.reserve(k_config_key_table.size());
-
-  for (const auto& [key, entry] : k_config_key_table) {
-    if (!entry.alias) {
-      keys.emplace_back(key);
-    }
-  }
-  std::sort(keys.begin(), keys.end());
-  for (const auto& key : keys) {
-    auto it = m_origins.find(key);
-    std::string origin = it != m_origins.end() ? it->second : "default";
-    item_visitor(key, get_string_value(key), origin);
-  }
+  rfl::to_view(m_data).apply([&](const auto& field) {
+    using Field = std::remove_cvref_t<decltype(field)>;
+    const std::string key(Field::name());
+    const auto it = m_origins.find(key);
+    const std::string origin = it != m_origins.end() ? it->second : "default";
+    const auto& opt = unwrap_option(*field.value());
+    item_visitor(
+      key,
+      config_detail::ConfigMeta::format_field(*this, key, opt.get()),
+      origin);
+  });
 }
 
 void
@@ -1262,8 +1237,9 @@ Config::set_item(const std::string_view& key,
                  bool negate,
                  const std::string& origin)
 {
-  auto it = k_config_key_table.find(key);
-  if (it == k_config_key_table.end()) {
+  const auto& meta = config_detail::reflected_config_meta();
+  const auto it = meta.key_info.find(key);
+  if (it == meta.key_info.end()) {
     // Ignore unknown keys.
     return;
   }
@@ -1271,211 +1247,10 @@ Config::set_item(const std::string_view& key,
   std::string value = util::value_or_throw<core::Error>(
     util::expand_environment_variables(unexpanded_value));
 
-  switch (it->second.item) {
-  case ConfigItem::absolute_paths_in_stderr:
-    m_absolute_paths_in_stderr = parse_bool(value, env_var_key, negate);
-    break;
+  auto view = rfl::to_view(m_data);
+  it->second.set_fn(*this, view, value, env_var_key, negate);
 
-  case ConfigItem::base_dir:
-    set_base_dirs(util::split_path_list(value));
-    break;
-
-  case ConfigItem::cache_dir:
-    set_cache_dir(value);
-    break;
-
-  case ConfigItem::ceiling_dirs:
-    set_ceiling_dirs(util::split_path_list(value));
-    break;
-
-  case ConfigItem::ceiling_markers:
-    set_ceiling_markers(util::split_path_list(value));
-    break;
-
-  case ConfigItem::compiler:
-    m_compiler = value;
-    break;
-
-  case ConfigItem::compiler_check:
-    m_compiler_check = value;
-    break;
-
-  case ConfigItem::compiler_type:
-    m_compiler_type = parse_compiler_type(value);
-    break;
-
-  case ConfigItem::compression:
-    m_compression = parse_bool(value, env_var_key, negate);
-    break;
-
-  case ConfigItem::compression_level:
-    m_compression_level = static_cast<int8_t>(util::value_or_throw<core::Error>(
-      util::parse_signed(value, INT8_MIN, INT8_MAX, "compression_level")));
-    break;
-
-  case ConfigItem::debug:
-    m_debug = parse_bool(value, env_var_key, negate);
-    break;
-
-  case ConfigItem::debug_dir:
-    m_debug_dir = value;
-    break;
-
-  case ConfigItem::debug_level:
-    m_debug_level = static_cast<uint8_t>(util::value_or_throw<core::Error>(
-      util::parse_unsigned(value, 0, UINT8_MAX, "debug level")));
-    break;
-
-  case ConfigItem::depend_mode:
-    m_depend_mode = parse_bool(value, env_var_key, negate);
-    break;
-
-  case ConfigItem::direct_mode:
-    m_direct_mode = parse_bool(value, env_var_key, negate);
-    break;
-
-  case ConfigItem::disable:
-    m_disable = parse_bool(value, env_var_key, negate);
-    break;
-
-  case ConfigItem::extra_files_to_hash:
-    m_extra_files_to_hash = value;
-    break;
-
-  case ConfigItem::file_clone:
-    m_file_clone = parse_bool(value, env_var_key, negate);
-    break;
-
-  case ConfigItem::hard_link:
-    m_hard_link = parse_bool(value, env_var_key, negate);
-    break;
-
-  case ConfigItem::hash_dir:
-    m_hash_dir = parse_bool(value, env_var_key, negate);
-    break;
-
-  case ConfigItem::ignore_headers_in_manifest:
-    m_ignore_headers_in_manifest = value;
-    break;
-
-  case ConfigItem::ignore_options:
-    m_ignore_options = value;
-    break;
-
-  case ConfigItem::inode_cache:
-    m_inode_cache = parse_bool(value, env_var_key, negate);
-    break;
-
-  case ConfigItem::keep_comments_cpp:
-    m_keep_comments_cpp = parse_bool(value, env_var_key, negate);
-    break;
-
-  case ConfigItem::libexec_dirs:
-    m_libexec_dirs = util::split_path_list(value);
-    break;
-
-  case ConfigItem::log_file:
-    m_log_file = value;
-    break;
-
-  case ConfigItem::max_files:
-    m_max_files = util::value_or_throw<core::Error>(
-      util::parse_unsigned(value, std::nullopt, std::nullopt, "max_files"));
-    break;
-
-  case ConfigItem::max_size: {
-    const auto [size, prefix_type] =
-      util::value_or_throw<core::Error>(util::parse_size(value));
-    m_max_size = size;
-    m_size_prefix_type = prefix_type;
-    break;
-  }
-
-  case ConfigItem::msvc_dep_prefix:
-    m_msvc_dep_prefix = value;
-    break;
-
-  case ConfigItem::msvc_utf8:
-    m_msvc_utf8 = parse_bool(value, env_var_key, negate);
-    break;
-
-  case ConfigItem::namespace_:
-    m_namespace = value;
-    break;
-
-  case ConfigItem::path:
-    m_path = value;
-    break;
-
-  case ConfigItem::pch_external_checksum:
-    m_pch_external_checksum = parse_bool(value, env_var_key, negate);
-    break;
-
-  case ConfigItem::prefix_command:
-    m_prefix_command = value;
-    break;
-
-  case ConfigItem::prefix_command_cpp:
-    m_prefix_command_cpp = value;
-    break;
-
-  case ConfigItem::read_only:
-    m_read_only = parse_bool(value, env_var_key, negate);
-    break;
-
-  case ConfigItem::read_only_direct:
-    m_read_only_direct = parse_bool(value, env_var_key, negate);
-    break;
-
-  case ConfigItem::recache:
-    m_recache = parse_bool(value, env_var_key, negate);
-    break;
-
-  case ConfigItem::remote_only:
-    m_remote_only = parse_bool(value, env_var_key, negate);
-    break;
-
-  case ConfigItem::remote_storage:
-    m_remote_storage = value;
-    break;
-
-  case ConfigItem::reshare:
-    m_reshare = parse_bool(value, env_var_key, negate);
-    break;
-
-  case ConfigItem::response_file_format:
-    m_response_file_format = parse_response_file_format(value);
-    break;
-
-  case ConfigItem::safe_dirs:
-    set_safe_dirs(util::split_path_list(value));
-    break;
-
-  case ConfigItem::sloppiness:
-    m_sloppiness = parse_sloppiness(value);
-    break;
-
-  case ConfigItem::stats:
-    m_stats = parse_bool(value, env_var_key, negate);
-    break;
-
-  case ConfigItem::stats_log:
-    m_stats_log = value;
-    break;
-
-  case ConfigItem::temporary_dir:
-    m_temporary_dir = value;
-    m_temporary_dir_configured_explicitly = true;
-    break;
-
-  case ConfigItem::umask:
-    if (!value.empty()) {
-      m_umask = util::value_or_throw<core::Error>(util::parse_umask(value));
-    }
-    break;
-  }
-
-  const std::string_view& canonical_key = it->second.alias.value_or(key);
+  const std::string_view canonical_key = it->second.canonical_key;
   const auto& [element, inserted] = m_origins.emplace(canonical_key, origin);
   if (!inserted) {
     element->second = origin;
@@ -1485,21 +1260,15 @@ Config::set_item(const std::string_view& key,
 void
 Config::check_key_tables_consistency()
 {
-  for (const auto& [key, value] : k_env_variable_table) {
-    if (k_config_key_table.find(value) == k_config_key_table.end()) {
-      throw core::Error(
-        FMT("env var {} mapped to {} which is missing from k_config_key_table",
-            key,
-            value));
-    }
-  }
+  config_detail::ConfigMeta::check_consistency(
+    std::make_index_sequence<rfl::num_fields<ConfigData>>{});
 }
 
 fs::path
 Config::default_temporary_dir() const
 {
   const auto dir = get_xdg_runtime_tmp_dir();
-  return !dir.empty() ? dir : m_cache_dir / "tmp";
+  return !dir.empty() ? dir : m_data.cache_dir.get() / "tmp";
 }
 
 std::filesystem::path
@@ -1537,7 +1306,7 @@ Config::find_directory_config() const
 
   while (true) {
     // Stop if dir is a ceiling dir (exclusive: don't check this dir).
-    for (const auto& ceiling : m_ceiling_dirs) {
+    for (const auto& ceiling : m_data.ceiling_dirs.get()) {
       if (dir == ceiling) {
         return std::nullopt;
       }
@@ -1577,7 +1346,7 @@ Config::find_directory_config() const
     }
 
     // Stop if this dir contains a ceiling marker.
-    for (const auto& marker : m_ceiling_markers) {
+    for (const auto& marker : m_data.ceiling_markers.get()) {
       if (DirEntry(dir / marker)) {
         return std::nullopt;
       }
