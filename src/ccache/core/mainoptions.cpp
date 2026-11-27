@@ -62,16 +62,10 @@
 #include <thread>
 #include <vector>
 
+#include <rfl/cli.hpp>
+
 #ifdef HAVE_UNISTD_H
 #  include <unistd.h>
-#endif
-
-#ifdef HAVE_GETOPT_LONG
-#  include <getopt.h>
-#elif defined(_WIN32)
-#  include <win32/getopt.h>
-#else
-#  error "getopt_long support is missing"
 #endif
 
 namespace fs = util::filesystem;
@@ -528,85 +522,73 @@ get_usage_text(const std::string_view ccache_name)
   return FMT(USAGE_TEXT, ccache_name);
 }
 
-enum : uint8_t {
-  CHECKSUM_FILE,
-  CONFIG_PATH,
-  DRY_RUN,
-  EVICT_NAMESPACE,
-  EVICT_OLDER_THAN,
-  EXTRACT_RESULT,
-  FORMAT,
-  HASH_FILE,
-  INSPECT,
-  PRINT_LOG_STATS,
-  PRINT_STATS,
-  PRINT_VERSION,
-  SHOW_LOG_STATS,
-  STOP_STORAGE_HELPERS,
-  THREADS,
-  TRIM_DIR,
-  TRIM_LOG,
-  TRIM_MARKER,
-  TRIM_MAX_SIZE,
-  TRIM_METHOD,
-  TRIM_RECOMPRESS,
-};
+using rfl::cli::Opt;
+using namespace rfl::cli::attr;
 
-#define REQUIRED required_argument
-#define NO_ARGUMENT no_argument
+using CcacheCliProcessors = rfl::Processors<rfl::DefaultIfMissing,
+                                            rfl::NoExtraFields,
+                                            rfl::cli::SeparateOptionValues,
+                                            rfl::cli::PureFlags,
+                                            rfl::cli::LastValueWins,
+                                            rfl::cli::AllowAbbreviations,
+                                            rfl::cli::ListDelimiter<"">>;
 
-const char options_string[] = "cCd:k:hF:M:po:svVxX:z";
-const option long_options[] = {
-  {"checksum-file",           REQUIRED,    nullptr, CHECKSUM_FILE       },
-  {"cleanup",                 NO_ARGUMENT, nullptr, 'c'                 },
-  {"clear",                   NO_ARGUMENT, nullptr, 'C'                 },
-  {"config-path",             REQUIRED,    nullptr, CONFIG_PATH         },
-  {"dir",                     REQUIRED,    nullptr, 'd'                 },
-  {"directory",               REQUIRED,    nullptr, 'd'                 }, // compat
-  {"dry-run",                 NO_ARGUMENT, nullptr, DRY_RUN             },
-  {"dump-manifest",           REQUIRED,    nullptr, INSPECT             }, // compat
-  {"dump-result",             REQUIRED,    nullptr, INSPECT             }, // compat
-  {"evict-namespace",         REQUIRED,    nullptr, EVICT_NAMESPACE     },
-  {"evict-older-than",        REQUIRED,    nullptr, EVICT_OLDER_THAN    },
-  {"extract-result",          REQUIRED,    nullptr, EXTRACT_RESULT      },
-  {"format",                  REQUIRED,    nullptr, FORMAT              },
-  {"get-config",              REQUIRED,    nullptr, 'k'                 },
-  {"hash-file",               REQUIRED,    nullptr, HASH_FILE           },
-  {"help",                    NO_ARGUMENT, nullptr, 'h'                 },
-  {"inspect",                 REQUIRED,    nullptr, INSPECT             },
-  {"max-files",               REQUIRED,    nullptr, 'F'                 },
-  {"max-size",                REQUIRED,    nullptr, 'M'                 },
-  {"print-log-stats",         NO_ARGUMENT, nullptr, PRINT_LOG_STATS     },
-  {"print-stats",             NO_ARGUMENT, nullptr, PRINT_STATS         },
-  {"print-version",           NO_ARGUMENT, nullptr, PRINT_VERSION       },
-  {"recompress",              REQUIRED,    nullptr, 'X'                 },
-  {"recompress-threads",      REQUIRED,    nullptr, THREADS             }, // compat
-  {"set-config",              REQUIRED,    nullptr, 'o'                 },
-  {"show-compression",        NO_ARGUMENT, nullptr, 'x'                 },
-  {"show-config",             NO_ARGUMENT, nullptr, 'p'                 },
-  {"show-log-stats",          NO_ARGUMENT, nullptr, SHOW_LOG_STATS      },
-  {"show-stats",              NO_ARGUMENT, nullptr, 's'                 },
-  {"stop-storage-helpers",    NO_ARGUMENT, nullptr, STOP_STORAGE_HELPERS},
-  {"threads",                 REQUIRED,    nullptr, THREADS             },
-  {"trim-dir",                REQUIRED,    nullptr, TRIM_DIR            },
-  {"trim-log",                REQUIRED,    nullptr, TRIM_LOG            },
-  {"trim-marker",             REQUIRED,    nullptr, TRIM_MARKER         },
-  {"trim-max-size",           REQUIRED,    nullptr, TRIM_MAX_SIZE       },
-  {"trim-method",             REQUIRED,    nullptr, TRIM_METHOD         },
-  {"trim-recompress",         REQUIRED,    nullptr, TRIM_RECOMPRESS     },
-  {"trim-recompress-threads", REQUIRED,    nullptr, THREADS             }, // compat
-  {"verbose",                 NO_ARGUMENT, nullptr, 'v'                 },
-  {"version",                 NO_ARGUMENT, nullptr, 'V'                 },
-  {"zero-stats",              NO_ARGUMENT, nullptr, 'z'                 },
-  {nullptr,                   0,           nullptr, 0                   }
+struct MainOptions
+{
+  Opt<std::vector<std::string>> checksum_file{};
+  Opt<bool, Short<"c">> cleanup{false};
+  Opt<bool, Short<"C">> clear{false};
+  Opt<std::optional<std::string>> config_path{};
+  Opt<std::optional<std::string>, Short<"d">, Alias<"directory">> dir{};
+  Opt<bool> dry_run{false};
+  Opt<std::optional<std::string>> evict_namespace{};
+  Opt<std::optional<std::string>> evict_older_than{};
+  Opt<std::optional<std::string>> extract_result{};
+  Opt<std::optional<std::string>> format{};
+  Opt<std::vector<std::string>, Short<"k">> get_config{};
+  Opt<std::vector<std::string>> hash_file{};
+  Opt<bool, Short<"h">> help{false};
+  Opt<std::optional<std::string>, Alias<"dump-manifest">, Alias<"dump-result">>
+    inspect{};
+  Opt<std::optional<std::string>, Short<"F">> max_files{};
+  Opt<std::optional<std::string>, Short<"M">> max_size{};
+  Opt<bool> print_log_stats{false};
+  Opt<bool> print_stats{false};
+  Opt<bool> print_version{false};
+  Opt<std::optional<std::string>, Short<"X">> recompress{};
+  Opt<std::vector<std::string>, Short<"o">> set_config{};
+  Opt<bool, Short<"x">> show_compression{false};
+  Opt<bool, Short<"p">> show_config{false};
+  Opt<bool> show_log_stats{false};
+  Opt<bool, Short<"s">> show_stats{false};
+  Opt<bool> stop_storage_helpers{false};
+  Opt<std::optional<std::string>,
+      Alias<"recompress-threads">,
+      Alias<"trim-recompress-threads">>
+    threads{};
+  Opt<std::optional<std::string>> trim_dir{};
+  Opt<std::optional<std::string>> trim_log{};
+  Opt<std::optional<std::string>> trim_marker{};
+  Opt<std::optional<std::string>> trim_max_size{};
+  Opt<std::optional<std::string>> trim_method{};
+  Opt<std::optional<std::string>> trim_recompress{};
+  Opt<uint8_t, Short<"v">, Counter> verbose{uint8_t{0}};
+  Opt<bool, Short<"V">> version{false};
+  Opt<bool, Short<"z">> zero_stats{false};
+  Opt<std::vector<std::string>, Positional> positional{};
 };
 
 int
 process_main_options(int argc, const char* const* argv)
 {
-  int c;
+  const auto parsed =
+    rfl::cli::read_detailed<MainOptions, CcacheCliProcessors>(argc, argv);
+  if (!parsed) {
+    PRINT(stderr, "{}: {}\n", argv[0], parsed.error().what());
+    return EXIT_FAILURE;
+  }
 
-  uint8_t verbosity = 0;
+  const uint8_t verbosity = parsed->value.verbose.value();
 
   StatisticsFormat format = StatisticsFormat::Tab;
   uint32_t threads = std::max<uint32_t>(2, std::thread::hardware_concurrency());
@@ -614,7 +596,8 @@ process_main_options(int argc, const char* const* argv)
   std::optional<util::SizeUnitPrefixType> trim_suffix_type;
   bool trim_lru_mtime = false;
   std::optional<std::optional<int8_t>> trim_recompress;
-  core::DryRun dry_run = DryRun::no;
+  const core::DryRun dry_run =
+    parsed->value.dry_run.value() ? DryRun::yes : DryRun::no;
   std::optional<fs::path> trim_log;
   std::optional<fs::path> trim_marker;
 
@@ -622,22 +605,10 @@ process_main_options(int argc, const char* const* argv)
   std::optional<uint64_t> evict_max_age;
 
   // First pass: Handle non-command options that affect command options.
-  while ((c = getopt_long(argc,
-                          const_cast<char* const*>(argv),
-                          options_string,
-                          long_options,
-                          nullptr))
-         != -1) {
-    const std::string arg = optarg ? optarg : std::string();
-
-    switch (c) {
-    case 'd': // --dir
+  for (const auto& [opt, arg] : parsed->occurrences) {
+    if (opt == "dir") {
       util::setenv("CCACHE_DIR", arg);
-      break;
-    case DRY_RUN:
-      dry_run = DryRun::yes;
-      break;
-    case FORMAT:
+    } else if (opt == "format") {
       if (arg == "tab") {
         format = StatisticsFormat::Tab;
       } else if (arg == "json") {
@@ -646,83 +617,46 @@ process_main_options(int argc, const char* const* argv)
         PRINT(stderr, "Error: unknown format \"{}\"\n", arg);
         return EXIT_FAILURE;
       }
-      break;
-
-    case CONFIG_PATH:
+    } else if (opt == "config-path") {
       util::setenv("CCACHE_CONFIGPATH", arg);
-      break;
-
-    case THREADS:
+    } else if (opt == "threads") {
       threads =
         static_cast<uint32_t>(util::value_or_throw<Error>(util::parse_unsigned(
           arg, 1, std::numeric_limits<uint32_t>::max(), "threads")));
-      break;
-
-    case TRIM_LOG:
+    } else if (opt == "trim-log") {
       trim_log = arg;
-      break;
-
-    case TRIM_MARKER:
+    } else if (opt == "trim-marker") {
       trim_marker = arg;
-      break;
-
-    case TRIM_MAX_SIZE: {
+    } else if (opt == "trim-max-size") {
       auto [size, suffix_type] =
         util::value_or_throw<Error>(util::parse_size(arg));
       trim_max_size = size;
       trim_suffix_type = suffix_type;
-      break;
-    }
-
-    case TRIM_METHOD:
+    } else if (opt == "trim-method") {
       trim_lru_mtime = (arg == "mtime");
-      break;
-
-    case TRIM_RECOMPRESS:
+    } else if (opt == "trim-recompress") {
       trim_recompress = parse_compression_level(arg);
-      break;
-
-    case 'v': // --verbose
-      ++verbosity;
-      break;
-
-    case '?': // unknown option
-      return EXIT_FAILURE;
     }
   }
 
   // Second pass: Handle command options in order.
-  optind = 1;
-  while ((c = getopt_long(argc,
-                          const_cast<char* const*>(argv),
-                          options_string,
-                          long_options,
-                          nullptr))
-         != -1) {
+  for (const auto& [opt, arg] : parsed->occurrences) {
+    if (opt == "config-path" || opt == "dir" || opt == "dry-run"
+        || opt == "format" || opt == "threads" || opt == "trim-log"
+        || opt == "trim-marker" || opt == "trim-max-size"
+        || opt == "trim-method" || opt == "trim-recompress"
+        || opt == "verbose") {
+      // Already handled in the first pass.
+      continue;
+    }
+
     Config config;
     config.read();
     util::logging::init(config.debug(), config.log_file());
 
     util::UmaskScope umask_scope(config.umask());
 
-    const std::string arg = optarg ? optarg : std::string();
-
-    switch (c) {
-    case CONFIG_PATH:
-    case 'd': // --dir
-    case DRY_RUN:
-    case FORMAT:
-    case THREADS:
-    case TRIM_LOG:
-    case TRIM_MARKER:
-    case TRIM_MAX_SIZE:
-    case TRIM_METHOD:
-    case TRIM_RECOMPRESS:
-    case 'v': // --verbose
-      // Already handled in the first pass.
-      break;
-
-    case CHECKSUM_FILE: {
+    if (opt == "checksum-file") {
       util::XXH3_128 checksum;
       util::Fd fd(arg == "-" ? STDIN_FILENO : open(arg.c_str(), O_RDONLY));
       if (fd) {
@@ -738,22 +672,13 @@ process_main_options(int argc, const char* const* argv)
         PRINT(stderr, "Error: Failed to checksum {}\n", arg);
         return EXIT_FAILURE;
       }
-      break;
-    }
-
-    case EVICT_NAMESPACE: {
+    } else if (opt == "evict-namespace") {
       evict_namespace = arg;
-      break;
-    }
-
-    case EVICT_OLDER_THAN: {
+    } else if (opt == "evict-older-than") {
       auto duration = util::value_or_throw<Error>(util::parse_duration(arg));
       evict_max_age =
         std::chrono::duration_cast<std::chrono::seconds>(duration).count();
-      break;
-    }
-
-    case EXTRACT_RESULT: {
+    } else if (opt == "extract-result") {
       if (dry_run == DryRun::yes) {
         PRINT(stderr, "--dry-run cannot be used with --extract-result\n");
         return EXIT_FAILURE;
@@ -780,9 +705,7 @@ process_main_options(int argc, const char* const* argv)
       result_deserializer.visit(result_extractor);
       cache_entry.verify_checksum();
       return EXIT_SUCCESS;
-    }
-
-    case HASH_FILE: {
+    } else if (opt == "hash-file") {
       Hash hash;
       const auto result =
         arg == "-" ? hash.hash_fd(STDIN_FILENO) : hash.hash_file(arg);
@@ -792,32 +715,20 @@ process_main_options(int argc, const char* const* argv)
         PRINT(stderr, "Error: Failed to hash {}: {}\n", arg, result.error());
         return EXIT_FAILURE;
       }
-      break;
-    }
-
-    case INSPECT:
+    } else if (opt == "inspect") {
       return inspect_path(arg);
-
-    case PRINT_STATS: {
+    } else if (opt == "print-stats") {
       const auto [counters, last_updated] =
         storage::local::LocalStorage(config).get_all_statistics();
       Statistics statistics(counters);
       PRINT(stdout,
             "{}",
             statistics.format_machine_readable(config, last_updated, format));
-      break;
-    }
-
-    case 'c': // --cleanup
-    {
+    } else if (opt == "cleanup") {
       ProgressBar progress_bar("Cleaning...");
       storage::local::LocalStorage(config).clean_all(
         dry_run, [&](double progress) { progress_bar.update(progress); });
-      break;
-    }
-
-    case 'C': // --clear
-    {
+    } else if (opt == "clear") {
       if (dry_run == DryRun::yes) {
         PRINT(stderr, "--dry-run cannot be used with --clear\n");
         return EXIT_FAILURE;
@@ -828,18 +739,12 @@ process_main_options(int argc, const char* const* argv)
       if (isatty(STDOUT_FILENO)) {
         PRINT(stdout, "\n");
       }
-      break;
-    }
-
-    case 'h': // --help
+    } else if (opt == "help") {
       PRINT(stdout, USAGE_TEXT, fs::path(argv[0]).filename());
       return EXIT_SUCCESS;
-
-    case 'k': // --get-config
+    } else if (opt == "get-config") {
       PRINT(stdout, "{}\n", config.get_string_value(arg));
-      break;
-
-    case 'F': { // --max-files
+    } else if (opt == "max-files") {
       if (dry_run == DryRun::yes) {
         PRINT(stderr, "--dry-run cannot be used with --max-files\n");
         return EXIT_FAILURE;
@@ -852,10 +757,7 @@ process_main_options(int argc, const char* const* argv)
       } else {
         PRINT(stdout, "Set cache file limit to {}\n", files);
       }
-      break;
-    }
-
-    case 'M': { // --max-size
+    } else if (opt == "max-size") {
       if (dry_run == DryRun::yes) {
         PRINT(stderr, "--dry-run cannot be used with --max-size\n");
         return EXIT_FAILURE;
@@ -872,10 +774,7 @@ process_main_options(int argc, const char* const* argv)
               "Set cache size limit to {}\n",
               util::format_human_readable_size(max_size, suffix_type));
       }
-      break;
-    }
-
-    case 'o': { // --set-config
+    } else if (opt == "set-config") {
       if (dry_run == DryRun::yes) {
         PRINT(stderr, "--dry-run cannot be used with --set-config\n");
         return EXIT_FAILURE;
@@ -889,14 +788,9 @@ process_main_options(int argc, const char* const* argv)
       std::string key = arg.substr(0, eq_pos);
       std::string value = arg.substr(eq_pos + 1);
       config.set_value_in_file(util::pstr(config.config_path()), key, value);
-      break;
-    }
-
-    case 'p': // --show-config
+    } else if (opt == "show-config") {
       config.visit_items(configuration_printer);
-      break;
-
-    case SHOW_LOG_STATS: {
+    } else if (opt == "show-log-stats") {
       if (config.stats_log().empty()) {
         throw Fatal("No stats log has been configured");
       }
@@ -907,10 +801,7 @@ process_main_options(int argc, const char* const* argv)
         stdout,
         "{}",
         statistics.format_human_readable(config, timestamp, verbosity, true));
-      break;
-    }
-
-    case PRINT_LOG_STATS: {
+    } else if (opt == "print-log-stats") {
       if (config.stats_log().empty()) {
         throw Fatal("No stats log has been configured");
       }
@@ -920,10 +811,7 @@ process_main_options(int argc, const char* const* argv)
       PRINT(stdout,
             "{}",
             statistics.format_machine_readable(config, timestamp, format));
-      break;
-    }
-
-    case 's': { // --show-stats
+    } else if (opt == "show-stats") {
       const auto [counters, last_updated] =
         storage::local::LocalStorage(config).get_all_statistics();
       Statistics statistics(counters);
@@ -931,25 +819,18 @@ process_main_options(int argc, const char* const* argv)
             "{}",
             statistics.format_human_readable(
               config, last_updated, verbosity, false));
-      break;
-    }
-
-    case STOP_STORAGE_HELPERS: {
+    } else if (opt == "stop-storage-helpers") {
       if (dry_run == DryRun::yes) {
         PRINT(stderr, "--dry-run cannot be used with --stop-storage-helpers\n");
         return EXIT_FAILURE;
       }
       storage::Storage storage(config, fs::path(argv[0]).parent_path());
       storage.stop_remote_storage_helpers();
-      break;
-    }
-
-    case TRIM_DIR:
+    } else if (opt == "trim-dir") {
       if (dry_run == DryRun::yes && trim_recompress) {
         PRINT(stderr, "--dry-run cannot be used with --trim-recompress\n");
         return EXIT_FAILURE;
       }
-
       if (!trim_max_size) {
         throw Error("please specify --trim-max-size when using --trim-dir");
       }
@@ -962,22 +843,13 @@ process_main_options(int argc, const char* const* argv)
                 .lru_mtime = trim_lru_mtime,
                 .recompress_level = trim_recompress,
                 .threads = threads});
-      break;
-
-    case 'V': // --version
-    {
+    } else if (opt == "version") {
       PRINT(stdout,
             "{}",
             get_version_text(util::pstr(fs::path(argv[0]).stem()).str()));
-      break;
-    }
-
-    case PRINT_VERSION:
+    } else if (opt == "print-version") {
       PRINT(stdout, "{}\n", CCACHE_VERSION);
-      break;
-
-    case 'x': // --show-compression
-    {
+    } else if (opt == "show-compression") {
       ProgressBar progress_bar("Scanning...");
       const auto compression_statistics =
         storage::local::LocalStorage(config).get_compression_statistics(
@@ -986,11 +858,7 @@ process_main_options(int argc, const char* const* argv)
         PRINT(stdout, "\n\n");
       }
       print_compression_statistics(config, compression_statistics);
-      break;
-    }
-
-    case 'X': // --recompress
-    {
+    } else if (opt == "recompress") {
       if (dry_run == DryRun::yes) {
         PRINT(stderr, "--dry-run cannot be used with --recompress\n");
         return EXIT_FAILURE;
@@ -1002,21 +870,13 @@ process_main_options(int argc, const char* const* argv)
         wanted_level, threads, [&](double progress) {
           progress_bar.update(progress);
         });
-      break;
-    }
-
-    case 'z': // --zero-stats
+    } else if (opt == "zero-stats") {
       if (dry_run == DryRun::yes) {
         PRINT(stderr, "--dry-run cannot be used with --zero-stats\n");
         return EXIT_FAILURE;
       }
       storage::local::LocalStorage(config).zero_all_statistics();
       PRINT(stdout, "Statistics zeroed\n");
-      break;
-
-    default:
-      PRINT(stderr, USAGE_TEXT, fs::path(argv[0]).filename());
-      return EXIT_FAILURE;
     }
   }
 
