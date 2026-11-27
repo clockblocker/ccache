@@ -48,6 +48,7 @@ target_link_libraries(
     dep_fmt
     dep_tlexpected
     dep_xxhash
+    reflectcpp
   PRIVATE
     dep_zstd
     standard_settings
